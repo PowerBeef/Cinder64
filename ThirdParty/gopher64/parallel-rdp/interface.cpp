@@ -475,6 +475,21 @@ void rdp_set_host_viewport(uint32_t width, uint32_t height) {
   }
 }
 
+bool rdp_rebind_window(void *_window, uint32_t width, uint32_t height) {
+  if (!_window || !wsi_platform) {
+    return false;
+  }
+
+  window = (SDL_Window *)_window;
+  host_surface_width.store(width > 0 ? width : 1);
+  host_surface_height.store(height > 0 ? height : 1);
+  wsi_platform->set_window(window);
+  wsi_platform->set_surface_size(host_surface_width.load(),
+                                 host_surface_height.load());
+  wsi_platform->do_resize();
+  return true;
+}
+
 static void calculate_viewport(float *x, float *y, float *width, float *height,
                                uint32_t display_height) {
   uint32_t display_width =

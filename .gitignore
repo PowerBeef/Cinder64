@@ -9,4 +9,5 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+/Roms/
 /Super Mario 64 (USA)/

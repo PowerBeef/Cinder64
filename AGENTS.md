@@ -2,6 +2,8 @@
 
 This file gives coding agents the repo-specific context they need to work safely in this checkout.
 
+This is the only maintained agent handbook in this repo. Do not recreate `CLAUDE.md`.
+
 ## What this is
 
 Cinder64 is a native macOS SwiftUI front-end for the [gopher64](https://github.com/gopher64/gopher64) Nintendo 64 emulator. The Swift app embeds gopher64 through a vendored Rust `cdylib` shim in `ThirdParty/gopher64/cinder64_bridge`, then hand-assembles `dist/Cinder64.app` with shell scripts.
@@ -34,7 +36,9 @@ There is no Xcode project workflow here. Use SwiftPM, Cargo, and the shell scrip
 - LaunchServices smoke: `./script/verify_launch_services_boot.sh [ROM] [WORKDIR]`
   Cold-launches the bundle into an isolated app-support root, checks `runtime.log`, `recent-games.json`, and asserts exactly one visible `Cinder64` window.
 - Full in-game boot smoke: `./script/verify_full_boot.sh [ROM] [WORKDIR]`
-  Cold-launches the app, injects scripted Start/A keypresses, asserts the scripted steps in `runtime.log`, verifies `frame_count` progression, checks recent-games persistence, and fails on crash reports or rejected keyboard injections.
+  Cold-launches the app, injects the `smoke` scripted Start/A key profile, asserts the scripted steps in `runtime.log`, verifies `frame_count` progression, checks recent-games persistence, and fails on crash reports or rejected keyboard injections.
+- Foreground visual boot helper: `./script/verify_visual_boot.sh [ROM] [WORKDIR]`
+  Cold-launches the app with the `visual` scripted Start/A key profile, waits through the expected title-to-gameplay timeline, and leaves the app open for foreground inspection.
 
 ## Load-bearing overrides
 
@@ -45,7 +49,9 @@ There is no Xcode project workflow here. Use SwiftPM, Cargo, and the shell scrip
 - `CINDER64_MOLTENVK_LIBRARY`, `CINDER64_FREETYPE_LIBRARY`, `CINDER64_LIBPNG_LIBRARY`
   Override Homebrew-resolved support libraries during bundle assembly.
 - `--scripted-keys "<ms>:<scancode>:<down|up>;..."`
-  Testing-only key injection hook used by `verify_full_boot.sh`.
+  Testing-only key injection hook used by the boot verification scripts.
+- `CINDER64_BOOT_KEY_PROFILE`
+  Optional profile override for boot verification scripts. Supported profiles live in `script/boot_key_profiles.sh`.
 
 ## Launch and emulation flow
 
@@ -63,15 +69,21 @@ This is the easiest place to break the app.
 - `RenderSurfaceView` hosts `RenderSurfaceHostingView`, an `NSViewRepresentable` wrapper around a custom `NSView`.
 - The host view publishes raw `NSWindow` and `NSView` pointers as `UInt` bit-patterns in `RenderSurfaceDescriptor`.
   These are opaque handles for the bridge. Do not dereference them from Swift.
+- `RenderSurfaceDescriptor` is a committed surface snapshot, not just a logical size blob.
+  It now carries window handle, view handle, logical size, pixel size, backing scale, and a monotonically increasing `revision`.
 - `RenderSurfaceHostingView` must remain `CAMetalLayer`-backed.
   `makeBackingLayer()` returns `CAMetalLayer`, and `publishDescriptorIfPossible()` keeps the layer frame, `contentsScale`, and `drawableSize` synced to the current bounds and backing scale.
-- The descriptor's `width` and `height` are logical view dimensions, not physical pixels.
-  The Rust bridge multiplies them by `backingScaleFactor` before calling `ui::video::set_host_viewport(...)`.
-- Identical surface descriptors are intentionally deduped on the Swift side.
-  Re-sending the same descriptor repeatedly can churn `updateSurface()` and destabilize hosted presentation.
+- The Swift host is the single source of truth for committed geometry.
+  `RenderSurfaceHostingView` computes both logical and physical pixel sizes and the Rust bridge consumes those exact values. Do not reintroduce “bridge multiplies logical size by scale” math.
+- Identical committed geometry is intentionally deduped on the Swift side.
+  If the handles, logical size, pixel size, and scale are unchanged, the descriptor should stay a no-op and keep the same `revision`.
+- Live resize is intentionally coalesced.
+  During `inLiveResize`, the host keeps the last committed drawable size and defers descriptor publication. A single committed resize should be published from `viewDidEndLiveResize()`.
+- Bridge surface updates are stateful.
+  Same committed geometry is a `no-op`, same handles with changed committed geometry is a `resize`, and changed handles force a `reattach`.
 - The host view also owns a 60 Hz `Timer` that calls `pumpRuntimeEvents()` on the main thread so the embedded SDL/Vulkan loop can service its queue.
 
-If you see audio plus advancing `frame_count` but a black or unstable image, suspect the host surface or point-to-pixel conversion before suspecting emulation correctness.
+If you see audio plus advancing `frame_count` but a black or unstable image, suspect committed surface publication, bridge surface action logs, or resize churn before suspecting emulation correctness.
 
 ## Invariants worth preserving
 
@@ -90,9 +102,15 @@ If you see audio plus advancing `frame_count` but a black or unstable image, sus
 ## Current render/boot gotchas
 
 - The hosted path is Retina-sensitive.
-  The Swift host publishes logical size plus scale; the Rust bridge converts that to physical pixel viewport size.
+  The Swift host publishes both logical and physical pixel sizes. If Retina behavior looks wrong, verify the published `pixelWidth` and `pixelHeight` first.
+- The main app window is intentionally discrete-size only.
+  Do not reintroduce freeform drag resizing. Supported user-facing modes are `1x`, `2x`, `3x`, `4x`, and `Fullscreen`.
+- Hosted presentation currently assumes discrete window transitions.
+  Windowed size changes snap between the supported presets, and the embedded fullscreen flag is still deferred until the next ROM launch while the host window mode changes immediately.
 - `verify_full_boot.sh` is log-based on purpose.
   Do not reintroduce screenshot assertions there: `screencapture -l <windowID>` can make the embedded runtime observe `emu_running == false` and exit on the next VI tick.
+- `verify_full_boot.sh` proves liveness, not visual scene identity.
+  Use `verify_visual_boot.sh` or a real foreground/manual pass when you need to confirm the title visibly advances into Lakitu or gameplay.
 - If the app appears to "stall" at the SM64 title, verify whether input focus and render stability are intact before changing bindings.
   The default keyboard profile is already valid.
 
@@ -119,13 +137,15 @@ For changes in the bridge, input, launch flow, or render host, prefer this seque
 - `swift test`
 - `./script/verify_launch_services_boot.sh`
 - `./script/verify_full_boot.sh`
+- `./script/verify_visual_boot.sh` when the change affects visible progression or keyboard focus
 
 For render fixes specifically, a good manual acceptance path is:
 
-1. Launch the repo ROM.
+1. Run `./script/verify_visual_boot.sh` or launch the repo ROM manually.
 2. Confirm the SM64 title is visibly rendering, not just playing audio.
-3. Press `Return` to leave the title.
-4. Confirm the app advances into a live in-game scene without runtime failure banners.
+3. Confirm the main window only offers the discrete `1x`, `2x`, `3x`, `4x`, and `Fullscreen` modes instead of freeform drag resizing.
+4. Confirm `Return` leaves the title without a click-to-focus rescue step.
+5. Confirm the app advances into a live in-game scene without runtime failure banners.
 
 ## Not in this repo
 

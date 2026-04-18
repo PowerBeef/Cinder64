@@ -141,10 +141,15 @@ final class EmulationSession {
 
     func handleKeyboardInput(_ event: EmbeddedKeyboardEvent) {
         guard snapshot.activeROM != nil else {
+            persistenceStore.logStore.record("info", "keyboard input ignored: no active ROM")
             return
         }
 
         guard snapshot.emulationState == .running || snapshot.emulationState == .paused else {
+            persistenceStore.logStore.record(
+                "info",
+                "keyboard input ignored: emulationState=\(snapshot.emulationState.rawValue)"
+            )
             return
         }
 
@@ -185,7 +190,15 @@ final class EmulationSession {
         }
 
         Task {
-            try? await coreHost.updateRenderSurface(descriptor)
+            do {
+                try await coreHost.updateRenderSurface(descriptor)
+            } catch {
+                persistenceStore.logStore.record(
+                    "warning",
+                    "render-surface update failed revision=\(descriptor.revision): \(error.localizedDescription)"
+                )
+                markRuntimeFailure(message: error.localizedDescription)
+            }
         }
     }
 
@@ -230,6 +243,7 @@ final class EmulationSession {
             ? "The embedded gopher64 runtime exited unexpectedly."
             : trimmedMessage
 
+        persistenceStore.logStore.record("warning", "Embedded runtime became inactive: \(failureMessage)")
         snapshot.emulationState = .failed
         snapshot.fps = 0
         snapshot.warningBanner = WarningBanner(

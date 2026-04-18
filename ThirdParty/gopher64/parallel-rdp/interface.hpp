@@ -59,6 +59,7 @@ void rdp_request_reset();
 void rdp_request_shutdown();
 void rdp_set_fullscreen(bool fullscreen);
 void rdp_set_host_viewport(uint32_t width, uint32_t height);
+bool rdp_rebind_window(void *_window, uint32_t width, uint32_t height);
 const char *rdp_last_close_error();
 
 void achievement_challenge_indicator_add(const char *achievement_title);

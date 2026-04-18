@@ -54,9 +54,12 @@ final class Gopher64Bridge {
                 session.rawValue,
                 descriptor.windowHandle,
                 descriptor.viewHandle,
-                Int32(descriptor.width),
-                Int32(descriptor.height),
-                descriptor.backingScaleFactor
+                Int32(descriptor.logicalWidth),
+                Int32(descriptor.logicalHeight),
+                Int32(descriptor.pixelWidth),
+                Int32(descriptor.pixelHeight),
+                descriptor.backingScaleFactor,
+                descriptor.revision
             ),
             session: session,
             context: "attaching the render surface"
@@ -73,9 +76,12 @@ final class Gopher64Bridge {
                 session.rawValue,
                 descriptor.windowHandle,
                 descriptor.viewHandle,
-                Int32(descriptor.width),
-                Int32(descriptor.height),
-                descriptor.backingScaleFactor
+                Int32(descriptor.logicalWidth),
+                Int32(descriptor.logicalHeight),
+                Int32(descriptor.pixelWidth),
+                Int32(descriptor.pixelHeight),
+                descriptor.backingScaleFactor,
+                descriptor.revision
             ),
             session: session,
             context: "updating the render surface"
@@ -201,6 +207,10 @@ final class Gopher64Bridge {
         runtime.string(from: runtime.lastError(session.rawValue))
     }
 
+    func surfaceEvent(session: Session) -> String? {
+        runtime.string(from: runtime.surfaceEvent(session.rawValue))
+    }
+
     private func ensureSuccess(_ result: Int32, session: Session, context: String) throws {
         guard result == 0 else {
             throw Gopher64BridgeError.commandFailed(
@@ -214,8 +224,8 @@ final class Gopher64Bridge {
 private struct LoadedRuntime {
     typealias CreateSessionFn = @convention(c) () -> UnsafeMutableRawPointer?
     typealias DestroySessionFn = @convention(c) (UnsafeMutableRawPointer?) -> Void
-    typealias AttachSurfaceFn = @convention(c) (UnsafeMutableRawPointer?, UInt, UInt, Int32, Int32, Double) -> Int32
-    typealias UpdateSurfaceFn = @convention(c) (UnsafeMutableRawPointer?, UInt, UInt, Int32, Int32, Double) -> Int32
+    typealias AttachSurfaceFn = @convention(c) (UnsafeMutableRawPointer?, UInt, UInt, Int32, Int32, Int32, Int32, Double, UInt64) -> Int32
+    typealias UpdateSurfaceFn = @convention(c) (UnsafeMutableRawPointer?, UInt, UInt, Int32, Int32, Int32, Int32, Double, UInt64) -> Int32
     typealias OpenROMFn = @convention(c) (
         UnsafeMutableRawPointer?,
         UnsafePointer<CChar>?,
@@ -240,6 +250,7 @@ private struct LoadedRuntime {
     typealias StopFn = @convention(c) (UnsafeMutableRawPointer?) -> Int32
     typealias PumpEventsFn = @convention(c) (UnsafeMutableRawPointer?) -> Int32
     typealias LastErrorFn = @convention(c) (UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
+    typealias SurfaceEventFn = @convention(c) (UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
     typealias VersionFn = @convention(c) () -> UnsafePointer<CChar>?
     typealias RendererNameFn = @convention(c) (UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
     typealias FrameRateFn = @convention(c) (UnsafeMutableRawPointer?) -> Double
@@ -262,6 +273,7 @@ private struct LoadedRuntime {
     let stop: StopFn
     let pumpEvents: PumpEventsFn
     let lastError: LastErrorFn
+    let surfaceEvent: SurfaceEventFn
     let version: VersionFn
     let rendererName: RendererNameFn
     let frameRate: FrameRateFn
@@ -292,6 +304,7 @@ private struct LoadedRuntime {
         self.stop = try Self.loadSymbol(from: handle, named: "cinder64_bridge_stop", as: StopFn.self)
         self.pumpEvents = try Self.loadSymbol(from: handle, named: "cinder64_bridge_pump_events", as: PumpEventsFn.self)
         self.lastError = try Self.loadSymbol(from: handle, named: "cinder64_bridge_last_error", as: LastErrorFn.self)
+        self.surfaceEvent = try Self.loadSymbol(from: handle, named: "cinder64_bridge_surface_event", as: SurfaceEventFn.self)
         self.version = try Self.loadSymbol(from: handle, named: "cinder64_bridge_version", as: VersionFn.self)
         self.rendererName = try Self.loadSymbol(from: handle, named: "cinder64_bridge_renderer_name", as: RendererNameFn.self)
         self.frameRate = try Self.loadSymbol(from: handle, named: "cinder64_bridge_frame_rate", as: FrameRateFn.self)

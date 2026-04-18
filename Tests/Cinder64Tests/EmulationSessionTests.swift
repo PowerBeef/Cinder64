@@ -159,7 +159,8 @@ struct EmulationSessionTests {
         let harness = try TemporaryDirectoryHarness()
         let persistence = PersistenceStore(
             recentGamesStore: RecentGamesStore(storageURL: harness.directory.appending(path: "recent.json")),
-            saveStateStore: SaveStateMetadataStore(storageURL: harness.directory.appending(path: "savestates.json"))
+            saveStateStore: SaveStateMetadataStore(storageURL: harness.directory.appending(path: "savestates.json")),
+            logStore: LogStore(logFileURL: harness.directory.appending(path: "runtime.log"))
         )
         let core = FakeCoreHost()
         let session = EmulationSession(coreHost: core, persistenceStore: persistence)
@@ -185,6 +186,25 @@ struct EmulationSessionTests {
             .setKeyboardKey(40, true),
             .setKeyboardKey(40, false),
         ])
+    }
+
+    @Test func keyboardInputWithoutAnActiveROMIsIgnoredAndLogged() async throws {
+        let harness = try TemporaryDirectoryHarness()
+        let logURL = harness.directory.appending(path: "runtime.log")
+        let persistence = PersistenceStore(
+            recentGamesStore: RecentGamesStore(storageURL: harness.directory.appending(path: "recent.json")),
+            saveStateStore: SaveStateMetadataStore(storageURL: harness.directory.appending(path: "savestates.json")),
+            logStore: LogStore(logFileURL: logURL)
+        )
+        let core = FakeCoreHost()
+        let session = EmulationSession(coreHost: core, persistenceStore: persistence)
+
+        session.handleKeyboardInput(EmbeddedKeyboardEvent(scancode: 40, isPressed: true))
+
+        await Task.yield()
+
+        #expect(core.events.isEmpty)
+        #expect(try String(contentsOf: logURL, encoding: .utf8).contains("keyboard input ignored: no active ROM"))
     }
 
     @Test func runtimeTerminationDuringPumpMarksTheSessionAsFailed() async throws {
@@ -218,11 +238,62 @@ struct EmulationSessionTests {
         #expect(session.snapshot.warningBanner?.message == "The embedded gopher64 runtime exited unexpectedly after boot.")
     }
 
-    @Test func keyboardInputIsIgnoredAfterTheRuntimeHasFailed() async throws {
+    @Test func renderSurfaceUpdateFailuresAreSurfaced() async throws {
         let harness = try TemporaryDirectoryHarness()
+        let logURL = harness.directory.appending(path: "runtime.log")
         let persistence = PersistenceStore(
             recentGamesStore: RecentGamesStore(storageURL: harness.directory.appending(path: "recent.json")),
-            saveStateStore: SaveStateMetadataStore(storageURL: harness.directory.appending(path: "savestates.json"))
+            saveStateStore: SaveStateMetadataStore(storageURL: harness.directory.appending(path: "savestates.json")),
+            logStore: LogStore(logFileURL: logURL)
+        )
+        let core = FakeCoreHost()
+        let session = EmulationSession(coreHost: core, persistenceStore: persistence)
+        let romURL = harness.directory.appending(path: "Super Mario 64.z64")
+        try Data("rom-data".utf8).write(to: romURL)
+        session.updateRenderSurface(
+            RenderSurfaceDescriptor(
+                windowHandle: 0xABCDABCD,
+                viewHandle: 0xFACADE,
+                width: 1280,
+                height: 720,
+                backingScaleFactor: 2
+            )
+        )
+
+        try await session.openROM(url: romURL)
+        core.updateRenderSurfaceError = NSError(
+            domain: "RenderSurfaceTests",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Surface sync failed."]
+        )
+
+        session.updateRenderSurface(
+            RenderSurfaceDescriptor(
+                windowHandle: 0xABCDABCD,
+                viewHandle: 0xFACADE,
+                logicalWidth: 1400,
+                logicalHeight: 800,
+                pixelWidth: 2800,
+                pixelHeight: 1600,
+                backingScaleFactor: 2,
+                revision: 2
+            )
+        )
+
+        await Task.yield()
+
+        #expect(session.snapshot.emulationState == .failed)
+        #expect(session.snapshot.warningBanner?.message == "Surface sync failed.")
+        #expect(try String(contentsOf: logURL, encoding: .utf8).contains("render-surface update failed revision=2"))
+    }
+
+    @Test func keyboardInputIsIgnoredAfterTheRuntimeHasFailed() async throws {
+        let harness = try TemporaryDirectoryHarness()
+        let logURL = harness.directory.appending(path: "runtime.log")
+        let persistence = PersistenceStore(
+            recentGamesStore: RecentGamesStore(storageURL: harness.directory.appending(path: "recent.json")),
+            saveStateStore: SaveStateMetadataStore(storageURL: harness.directory.appending(path: "savestates.json")),
+            logStore: LogStore(logFileURL: logURL)
         )
         let core = FakeCoreHost()
         let session = EmulationSession(coreHost: core, persistenceStore: persistence)
@@ -246,6 +317,7 @@ struct EmulationSessionTests {
         await Task.yield()
 
         #expect(core.events.contains(.setKeyboardKey(40, true)) == false)
+        #expect(try String(contentsOf: logURL, encoding: .utf8).contains("keyboard input ignored: emulationState=failed"))
     }
 
 }
@@ -269,6 +341,7 @@ private final class FakeCoreHost: CoreHosting {
     var openConfigurations: [CoreHostConfiguration] = []
     var resumeBehavior: ResumeBehavior = .immediate
     var nextPumpEvent: CoreRuntimeEvent?
+    var updateRenderSurfaceError: Error?
     private(set) var resumeRequestCount = 0
     private(set) var lastROMIdentity: ROMIdentity?
     private var pendingResumeContinuation: CheckedContinuation<Void, Never>?
@@ -290,7 +363,11 @@ private final class FakeCoreHost: CoreHosting {
         )
     }
 
-    func updateRenderSurface(_ descriptor: RenderSurfaceDescriptor) async throws {}
+    func updateRenderSurface(_ descriptor: RenderSurfaceDescriptor) async throws {
+        if let updateRenderSurfaceError {
+            throw updateRenderSurfaceError
+        }
+    }
 
     func pumpEvents() -> CoreRuntimeEvent? {
         defer { nextPumpEvent = nil }

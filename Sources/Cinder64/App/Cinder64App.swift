@@ -6,6 +6,7 @@ import SwiftUI
 struct Cinder64App: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var session: EmulationSession
+    @State private var mainWindowController = MainWindowController()
 
     init() {
         do {
@@ -29,8 +30,21 @@ struct Cinder64App: App {
 
     var body: some Scene {
         Window("Cinder64", id: "main") {
-            ContentView(session: session)
-                .frame(minWidth: 980, minHeight: 640)
+            ContentView(
+                session: session,
+                openROMRequested: { Task { await openROM() } },
+                launchROMRequested: { url in
+                    LaunchRequestBroker.shared.enqueue(url)
+                },
+                applyDisplayMode: applyDisplayMode
+            )
+                .background {
+                    MainWindowAccessor(
+                        displayMode: MainWindowDisplayMode(settings: session.activeSettings),
+                        controller: mainWindowController
+                    )
+                }
+                .frame(minWidth: 860, minHeight: 560)
                 .task {
                     await LaunchRequestBroker.shared.installHandler(handleLaunchRequest)
                 }
@@ -62,12 +76,23 @@ struct Cinder64App: App {
                 .keyboardShortcut("k")
                 .disabled(session.snapshot.emulationState != .running && session.snapshot.emulationState != .paused)
             }
+
+            CommandMenu("Display Mode") {
+                ForEach(MainWindowDisplayMode.allCases, id: \.self) { mode in
+                    Button(mode.title) {
+                        applyDisplayMode(mode)
+                    }
+                    .disabled(MainWindowDisplayMode(settings: session.activeSettings) == mode)
+                }
+            }
         }
 
         Settings {
-            SettingsView(session: session)
-                .padding(24)
-                .frame(width: 420)
+            SettingsView(
+                session: session,
+                applyDisplayMode: applyDisplayMode
+            )
+                .frame(width: 460, height: 520)
         }
     }
 
@@ -88,9 +113,33 @@ struct Cinder64App: App {
     private func handleLaunchRequest(_ url: URL) async {
         do {
             try await session.openROM(url: url)
+            reactivateMainWindow()
+            mainWindowController.apply(mode: MainWindowDisplayMode(settings: session.activeSettings))
             startScriptedKeyPlaybackIfNeeded()
         } catch {
             session.presentWarning(title: "Unable to Launch ROM", message: error.localizedDescription)
+        }
+    }
+
+    private func reactivateMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        let candidateWindow = NSApp.mainWindow
+            ?? NSApp.keyWindow
+            ?? NSApp.windows.first(where: \.isVisible)
+            ?? NSApp.windows.first
+        candidateWindow?.makeKeyAndOrderFront(nil)
+        if let candidateWindow {
+            mainWindowController.bind(window: candidateWindow)
+        }
+    }
+
+    private func applyDisplayMode(_ mode: MainWindowDisplayMode) {
+        var settings = session.activeSettings
+        mode.apply(to: &settings)
+        mainWindowController.apply(mode: mode)
+
+        Task {
+            try? await session.updateSettings(settings)
         }
     }
 

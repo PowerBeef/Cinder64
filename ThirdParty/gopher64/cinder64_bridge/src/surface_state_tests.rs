@@ -1,0 +1,79 @@
+use crate::{HostSurfaceDescriptor, SurfaceApplyAction, determine_surface_apply_action};
+
+fn make_surface(
+    window_handle: usize,
+    view_handle: usize,
+    logical_width: i32,
+    logical_height: i32,
+    pixel_width: u32,
+    pixel_height: u32,
+    backing_scale_factor: f64,
+    revision: u64,
+) -> HostSurfaceDescriptor {
+    HostSurfaceDescriptor {
+        window_handle,
+        view_handle,
+        logical_width,
+        logical_height,
+        pixel_width,
+        pixel_height,
+        backing_scale_factor,
+        revision,
+    }
+}
+
+#[test]
+fn initial_surface_requires_attach() {
+    let incoming = make_surface(0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 1);
+
+    let action = determine_surface_apply_action(None, &incoming);
+
+    assert_eq!(action, SurfaceApplyAction::Attach);
+}
+
+#[test]
+fn identical_revision_is_a_no_op() {
+    let applied = make_surface(0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
+    let incoming = make_surface(0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
+
+    let action = determine_surface_apply_action(Some(&applied), &incoming);
+
+    assert_eq!(action, SurfaceApplyAction::NoOp);
+}
+
+#[test]
+fn pixel_size_change_is_a_resize() {
+    let applied = make_surface(0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
+    let incoming = make_surface(0xCAFE, 0xBEEF, 700, 500, 1400, 1000, 2.0, 4);
+
+    let action = determine_surface_apply_action(Some(&applied), &incoming);
+
+    assert_eq!(action, SurfaceApplyAction::Resize);
+}
+
+#[test]
+fn handle_change_requires_reattach() {
+    let applied = make_surface(0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
+    let incoming = make_surface(0xFACE, 0xD00D, 640, 480, 1280, 960, 2.0, 4);
+
+    let action = determine_surface_apply_action(Some(&applied), &incoming);
+
+    assert_eq!(action, SurfaceApplyAction::Reattach);
+}
+
+#[test]
+fn scale_change_still_uses_resize() {
+    let applied = make_surface(0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
+    let incoming = make_surface(0xCAFE, 0xBEEF, 640, 480, 1920, 1440, 3.0, 4);
+
+    let action = determine_surface_apply_action(Some(&applied), &incoming);
+
+    assert_eq!(action, SurfaceApplyAction::Resize);
+}
+
+#[test]
+fn invalid_descriptor_is_rejected_cleanly() {
+    let invalid = make_surface(0, 0, 0, 0, 0, 0, 0.0, 0);
+
+    assert!(!invalid.is_valid());
+}

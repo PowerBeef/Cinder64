@@ -25,6 +25,7 @@ unsafe extern "C" {
     fn rdp_request_shutdown();
     fn rdp_set_fullscreen(fullscreen: bool);
     fn rdp_set_host_viewport(width: u32, height: u32);
+    fn rdp_rebind_window(window: *mut c_void, width: u32, height: u32) -> bool;
     fn rdp_last_close_error() -> *const std::ffi::c_char;
 }
 
@@ -197,6 +198,23 @@ pub fn destroy_embedded_window(window: *mut sdl3_sys::video::SDL_Window) {
 
     unsafe {
         sdl3_sys::video::SDL_DestroyWindow(window);
+    }
+}
+
+pub fn replace_embedded_window(
+    _current_window: *mut sdl3_sys::video::SDL_Window,
+    replacement_window: *mut sdl3_sys::video::SDL_Window,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    if replacement_window.is_null() {
+        return Err("The replacement embedded SDL window has not been created yet.".to_string());
+    }
+
+    if unsafe { rdp_rebind_window(replacement_window as *mut c_void, width, height) } {
+        Ok(())
+    } else {
+        Err("Could not rebind the embedded SDL window to the hosted renderer.".to_string())
     }
 }
 

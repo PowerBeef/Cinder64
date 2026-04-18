@@ -2,6 +2,7 @@ import Foundation
 
 struct CoreUserSettings: Codable, Equatable, Sendable {
     var startFullscreen: Bool
+    var windowScale: Int
     var muteAudio: Bool
     var speedPercent: Int
     var upscaleMultiplier: Int
@@ -10,6 +11,7 @@ struct CoreUserSettings: Codable, Equatable, Sendable {
 
     static let `default` = CoreUserSettings(
         startFullscreen: false,
+        windowScale: 1,
         muteAudio: false,
         speedPercent: 100,
         upscaleMultiplier: 2,
@@ -19,6 +21,7 @@ struct CoreUserSettings: Codable, Equatable, Sendable {
 
     init(
         startFullscreen: Bool,
+        windowScale: Int,
         muteAudio: Bool,
         speedPercent: Int,
         upscaleMultiplier: Int,
@@ -26,6 +29,7 @@ struct CoreUserSettings: Codable, Equatable, Sendable {
         crtFilterEnabled: Bool
     ) {
         self.startFullscreen = startFullscreen
+        self.windowScale = Self.clamp(windowScale, min: 1, max: 4)
         self.muteAudio = muteAudio
         self.speedPercent = Self.clamp(speedPercent, min: 25, max: 300)
         self.upscaleMultiplier = Self.clamp(upscaleMultiplier, min: 1, max: 8)
@@ -37,6 +41,7 @@ struct CoreUserSettings: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
             startFullscreen: try container.decodeIfPresent(Bool.self, forKey: .startFullscreen) ?? false,
+            windowScale: try container.decodeIfPresent(Int.self, forKey: .windowScale) ?? 1,
             muteAudio: try container.decodeIfPresent(Bool.self, forKey: .muteAudio) ?? false,
             speedPercent: try container.decodeIfPresent(Int.self, forKey: .speedPercent) ?? 100,
             upscaleMultiplier: try container.decodeIfPresent(Int.self, forKey: .upscaleMultiplier) ?? 2,
@@ -51,6 +56,7 @@ struct CoreUserSettings: Codable, Equatable, Sendable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(startFullscreen, forKey: .startFullscreen)
+        try container.encode(windowScale, forKey: .windowScale)
         try container.encode(muteAudio, forKey: .muteAudio)
         try container.encode(speedPercent, forKey: .speedPercent)
         try container.encode(upscaleMultiplier, forKey: .upscaleMultiplier)
@@ -60,6 +66,7 @@ struct CoreUserSettings: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case startFullscreen
+        case windowScale
         case muteAudio
         case speedPercent
         case upscaleMultiplier
@@ -106,12 +113,80 @@ struct AppRuntimeDirectories: Codable, Equatable, Sendable {
 struct RenderSurfaceDescriptor: Equatable, Sendable {
     let windowHandle: UInt
     let viewHandle: UInt
-    let width: Int
-    let height: Int
+    let logicalWidth: Int
+    let logicalHeight: Int
+    let pixelWidth: Int
+    let pixelHeight: Int
     let backingScaleFactor: Double
+    let revision: UInt64
+
+    init(
+        windowHandle: UInt,
+        viewHandle: UInt,
+        logicalWidth: Int,
+        logicalHeight: Int,
+        pixelWidth: Int,
+        pixelHeight: Int,
+        backingScaleFactor: Double,
+        revision: UInt64
+    ) {
+        self.windowHandle = windowHandle
+        self.viewHandle = viewHandle
+        self.logicalWidth = logicalWidth
+        self.logicalHeight = logicalHeight
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.backingScaleFactor = backingScaleFactor
+        self.revision = revision
+    }
+
+    init(
+        windowHandle: UInt,
+        viewHandle: UInt,
+        width: Int,
+        height: Int,
+        backingScaleFactor: Double
+    ) {
+        let pixelWidth = Int((Double(width) * backingScaleFactor).rounded())
+        let pixelHeight = Int((Double(height) * backingScaleFactor).rounded())
+        self.init(
+            windowHandle: windowHandle,
+            viewHandle: viewHandle,
+            logicalWidth: width,
+            logicalHeight: height,
+            pixelWidth: max(pixelWidth, 1),
+            pixelHeight: max(pixelHeight, 1),
+            backingScaleFactor: backingScaleFactor,
+            revision: 1
+        )
+    }
+
+    var width: Int { logicalWidth }
+    var height: Int { logicalHeight }
 
     var isValid: Bool {
-        windowHandle != 0 && viewHandle != 0 && width > 0 && height > 0 && backingScaleFactor > 0
+        windowHandle != 0 &&
+            viewHandle != 0 &&
+            logicalWidth > 0 &&
+            logicalHeight > 0 &&
+            pixelWidth > 0 &&
+            pixelHeight > 0 &&
+            backingScaleFactor > 0 &&
+            revision > 0
+    }
+
+    func matchesCommittedGeometry(of other: RenderSurfaceDescriptor) -> Bool {
+        windowHandle == other.windowHandle &&
+            viewHandle == other.viewHandle &&
+            logicalWidth == other.logicalWidth &&
+            logicalHeight == other.logicalHeight &&
+            pixelWidth == other.pixelWidth &&
+            pixelHeight == other.pixelHeight &&
+            backingScaleFactor == other.backingScaleFactor
+    }
+
+    func matchesHandles(of other: RenderSurfaceDescriptor) -> Bool {
+        windowHandle == other.windowHandle && viewHandle == other.viewHandle
     }
 }
 

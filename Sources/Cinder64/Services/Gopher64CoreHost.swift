@@ -88,9 +88,23 @@ final class Gopher64CoreHost: CoreHosting {
     }
 
     func updateSettings(_ settings: CoreUserSettings) async throws {
+        let requestedVideoMode: VideoMode = settings.startFullscreen ? .fullscreen : .windowed
+        let hasActiveRuntime = currentSnapshot.activeROM != nil &&
+            currentSnapshot.emulationState != .stopped &&
+            currentSnapshot.emulationState != .failed
+
         try executor.updateSettings(settings)
         currentSnapshot.audioMuted = settings.muteAudio
-        currentSnapshot.videoMode = settings.startFullscreen ? .fullscreen : .windowed
+        if hasActiveRuntime, currentSnapshot.videoMode != requestedVideoMode {
+            logStore.record(
+                "info",
+                "embedded fullscreen flag deferred until the next ROM launch while the host window mode changes immediately"
+            )
+            currentSnapshot.videoMode = requestedVideoMode
+            return
+        }
+
+        currentSnapshot.videoMode = requestedVideoMode
     }
 
     func updateInputMapping(_ mapping: InputMappingProfile) async throws {
@@ -136,8 +150,11 @@ private final class Gopher64CoreExecutor {
         let session = try bridge.createSession()
 
         do {
+            logSurfaceRequest("attach", descriptor: renderSurface)
             try bridge.attachSurface(renderSurface, session: session)
+            logSurfaceEventIfAvailable(from: bridge, session: session)
             let runtime = try bridge.openROM(at: url, configuration: configuration, session: session)
+            logSurfaceEventIfAvailable(from: bridge, session: session)
             self.bridge = bridge
             self.session = session
             return runtime
@@ -149,7 +166,9 @@ private final class Gopher64CoreExecutor {
 
     func updateRenderSurface(_ descriptor: RenderSurfaceDescriptor) throws {
         guard let bridge, let session, descriptor.isValid else { return }
+        logSurfaceRequest("update", descriptor: descriptor)
         try bridge.updateSurface(descriptor, session: session)
+        logSurfaceEventIfAvailable(from: bridge, session: session)
     }
 
     func pumpEvents() -> CoreRuntimeEvent? {
@@ -223,6 +242,20 @@ private final class Gopher64CoreExecutor {
         bridge.destroy(session)
         self.bridge = nil
         self.session = nil
+    }
+
+    private func logSurfaceRequest(_ kind: String, descriptor: RenderSurfaceDescriptor) {
+        logStore.record(
+            "info",
+            "render-surface request kind=\(kind) revision=\(descriptor.revision) logical=\(descriptor.logicalWidth)x\(descriptor.logicalHeight) pixel=\(descriptor.pixelWidth)x\(descriptor.pixelHeight) scale=\(String(format: "%.2f", descriptor.backingScaleFactor))"
+        )
+    }
+
+    private func logSurfaceEventIfAvailable(from bridge: Gopher64Bridge, session: Gopher64Bridge.Session) {
+        guard let message = bridge.surfaceEvent(session: session), message.isEmpty == false else {
+            return
+        }
+        logStore.record("info", message)
     }
 }
 

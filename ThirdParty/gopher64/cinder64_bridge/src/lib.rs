@@ -10,23 +10,60 @@ use std::time::Duration;
 
 const VERSION: &[u8] = b"gopher64-cinder64-bridge 0.2.0\0";
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 struct HostSurfaceDescriptor {
     window_handle: usize,
     view_handle: usize,
-    width: i32,
-    height: i32,
+    logical_width: i32,
+    logical_height: i32,
+    pixel_width: u32,
+    pixel_height: u32,
     backing_scale_factor: f64,
+    revision: u64,
 }
 
 impl HostSurfaceDescriptor {
-    fn pixel_width(&self) -> u32 {
-        ((self.width as f64 * self.backing_scale_factor).round() as i64).max(1) as u32
+    fn is_valid(&self) -> bool {
+        self.window_handle != 0
+            && self.view_handle != 0
+            && self.logical_width > 0
+            && self.logical_height > 0
+            && self.pixel_width > 0
+            && self.pixel_height > 0
+            && self.backing_scale_factor > 0.0
+            && self.revision > 0
     }
 
-    fn pixel_height(&self) -> u32 {
-        ((self.height as f64 * self.backing_scale_factor).round() as i64).max(1) as u32
+    fn matches_handles(&self, other: &HostSurfaceDescriptor) -> bool {
+        self.window_handle == other.window_handle && self.view_handle == other.view_handle
     }
+
+    fn matches_committed_geometry(&self, other: &HostSurfaceDescriptor) -> bool {
+        self.matches_handles(other)
+            && self.logical_width == other.logical_width
+            && self.logical_height == other.logical_height
+            && self.pixel_width == other.pixel_width
+            && self.pixel_height == other.pixel_height
+            && self.backing_scale_factor == other.backing_scale_factor
+    }
+
+    fn embedded_window_descriptor(&self) -> ui::video::EmbeddedWindowDescriptor {
+        ui::video::EmbeddedWindowDescriptor {
+            cocoa_window: self.window_handle as *mut std::ffi::c_void,
+            cocoa_view: self.view_handle as *mut std::ffi::c_void,
+            width: self.logical_width,
+            height: self.logical_height,
+            high_pixel_density: self.backing_scale_factor > 1.0,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum SurfaceApplyAction {
+    Attach,
+    Resize,
+    Reattach,
+    NoOp,
 }
 
 #[derive(Clone, Default)]
@@ -68,11 +105,13 @@ impl EmbeddedWindowHandle {
 
 pub struct BridgeSession {
     surface: Option<HostSurfaceDescriptor>,
+    last_applied_surface: Option<HostSurfaceDescriptor>,
     current_rom_path: Option<PathBuf>,
     runtime_directories: Option<RuntimeDirectories>,
     settings: RuntimeSettings,
     renderer_name: CString,
     last_error: CString,
+    last_surface_event: CString,
     frame_rate: f64,
     sdl_window: Option<EmbeddedWindowHandle>,
     runtime_status: Arc<Mutex<RuntimeStatus>>,
@@ -84,6 +123,7 @@ impl BridgeSession {
     fn new() -> Self {
         Self {
             surface: None,
+            last_applied_surface: None,
             current_rom_path: None,
             runtime_directories: None,
             settings: RuntimeSettings {
@@ -97,6 +137,7 @@ impl BridgeSession {
             },
             renderer_name: CString::new("gopher64 + parallel-rdp (embedded)").unwrap(),
             last_error: CString::new("").unwrap(),
+            last_surface_event: CString::new("").unwrap(),
             frame_rate: 0.0,
             sdl_window: None,
             runtime_status: Arc::new(Mutex::new(RuntimeStatus::default())),
@@ -118,6 +159,10 @@ impl BridgeSession {
         if let Ok(mut status) = self.runtime_status.lock() {
             status.last_error = None;
         }
+    }
+
+    fn set_surface_event(&mut self, message: impl AsRef<str>) {
+        self.last_surface_event = sanitize_c_string(message.as_ref());
     }
 
     fn update_error_from_runtime(&mut self) {
@@ -196,6 +241,103 @@ fn ensure_runtime_directories(directories: &RuntimeDirectories) -> Result<(), St
             .map_err(|error| format!("Could not prepare {}: {error}", directory.display()))?;
     }
     Ok(())
+}
+
+fn determine_surface_apply_action(
+    last_applied: Option<&HostSurfaceDescriptor>,
+    incoming: &HostSurfaceDescriptor,
+) -> SurfaceApplyAction {
+    match last_applied {
+        None => SurfaceApplyAction::Attach,
+        Some(applied)
+            if applied.revision == incoming.revision || applied.matches_committed_geometry(incoming) =>
+        {
+            SurfaceApplyAction::NoOp
+        }
+        Some(applied) if applied.matches_handles(incoming) => SurfaceApplyAction::Resize,
+        Some(_) => SurfaceApplyAction::Reattach,
+    }
+}
+
+fn surface_event_message(
+    action: &str,
+    surface: &HostSurfaceDescriptor,
+    details: &str,
+) -> String {
+    format!(
+        "render-surface action={action} revision={} logical={}x{} pixel={}x{} scale={:.2} {details}",
+        surface.revision,
+        surface.logical_width,
+        surface.logical_height,
+        surface.pixel_width,
+        surface.pixel_height,
+        surface.backing_scale_factor
+    )
+}
+
+fn apply_surface_update(
+    session: &mut BridgeSession,
+    incoming: HostSurfaceDescriptor,
+) -> Result<SurfaceApplyAction, String> {
+    let action = determine_surface_apply_action(session.last_applied_surface.as_ref(), &incoming);
+
+    match action {
+        SurfaceApplyAction::NoOp => {
+            session.set_surface_event(surface_event_message(
+                "no-op",
+                &incoming,
+                "reason=unchanged-geometry",
+            ));
+        }
+        SurfaceApplyAction::Attach => {
+            ui::video::set_host_viewport(incoming.pixel_width, incoming.pixel_height);
+            let window = session
+                .sdl_window
+                .ok_or_else(|| "The embedded SDL window has not been created yet.".to_string())?;
+            ui::video::sync_embedded_window(window.as_ptr() as _)?;
+            session.set_surface_event(surface_event_message(
+                "attach",
+                &incoming,
+                "viewport=ok sdl-sync=ok wsi-resize=ok",
+            ));
+        }
+        SurfaceApplyAction::Resize => {
+            ui::video::set_host_viewport(incoming.pixel_width, incoming.pixel_height);
+            let window = session
+                .sdl_window
+                .ok_or_else(|| "The embedded SDL window has not been created yet.".to_string())?;
+            ui::video::sync_embedded_window(window.as_ptr() as _)?;
+            session.set_surface_event(surface_event_message(
+                "resize",
+                &incoming,
+                "viewport=ok sdl-sync=ok wsi-resize=ok",
+            ));
+        }
+        SurfaceApplyAction::Reattach => {
+            let current_window = session
+                .sdl_window
+                .ok_or_else(|| "The embedded SDL window has not been created yet.".to_string())?;
+            let replacement_window =
+                ui::video::create_embedded_window(incoming.embedded_window_descriptor())?;
+            ui::video::replace_embedded_window(
+                current_window.as_ptr() as _,
+                replacement_window,
+                incoming.pixel_width,
+                incoming.pixel_height,
+            )?;
+            ui::video::destroy_embedded_window(current_window.as_ptr() as _);
+            session.sdl_window = Some(EmbeddedWindowHandle(replacement_window as usize));
+            session.set_surface_event(surface_event_message(
+                "reattach",
+                &incoming,
+                "replacement-window=create-ok wsi-rebind=ok",
+            ));
+        }
+    }
+
+    session.surface = Some(incoming.clone());
+    session.last_applied_surface = Some(incoming);
+    Ok(action)
 }
 
 fn spawn_runtime_thread(
@@ -319,6 +461,7 @@ fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
             ui::video::destroy_embedded_window(window.as_ptr() as _);
         }
         session.sdl_window = None;
+        session.last_applied_surface = None;
         session.current_rom_path = None;
         session.frame_rate = 0.0;
         return Ok(());
@@ -343,6 +486,7 @@ fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
     if let Some(window) = session.sdl_window.take() {
         ui::video::destroy_embedded_window(window.as_ptr() as _);
     }
+    session.last_applied_surface = None;
     session.current_rom_path = None;
     session.frame_rate = 0.0;
     if let Ok(mut status) = session.runtime_status.lock() {
@@ -381,29 +525,52 @@ pub unsafe extern "C" fn cinder64_bridge_attach_surface(
     session: *mut BridgeSession,
     window_handle: usize,
     view_handle: usize,
-    width: i32,
-    height: i32,
+    logical_width: i32,
+    logical_height: i32,
+    pixel_width: i32,
+    pixel_height: i32,
     backing_scale_factor: f64,
+    revision: u64,
 ) -> i32 {
     let Ok(session) = session_from_ptr(session) else {
         return -1;
     };
 
-    if window_handle == 0 || view_handle == 0 || width <= 0 || height <= 0 || backing_scale_factor <= 0.0 {
+    let surface = HostSurfaceDescriptor {
+        window_handle,
+        view_handle,
+        logical_width,
+        logical_height,
+        pixel_width: pixel_width.max(1) as u32,
+        pixel_height: pixel_height.max(1) as u32,
+        backing_scale_factor,
+        revision,
+    };
+
+    if !surface.is_valid() {
         return session.set_error(
             "The Swift host provided an invalid embedded render surface descriptor.",
         );
     }
 
-    session.surface = Some(HostSurfaceDescriptor {
-        window_handle,
-        view_handle,
-        width,
-        height,
-        backing_scale_factor,
-    });
-    session.clear_error();
-    0
+    if session.has_active_runtime() {
+        match apply_surface_update(session, surface) {
+            Ok(_) => {
+                session.clear_error();
+                0
+            }
+            Err(message) => session.set_error(message),
+        }
+    } else {
+        session.set_surface_event(surface_event_message(
+            "pending",
+            &surface,
+            "reason=runtime-inactive",
+        ));
+        session.surface = Some(surface);
+        session.clear_error();
+        0
+    }
 }
 
 #[no_mangle]
@@ -411,42 +578,52 @@ pub unsafe extern "C" fn cinder64_bridge_update_surface(
     session: *mut BridgeSession,
     window_handle: usize,
     view_handle: usize,
-    width: i32,
-    height: i32,
+    logical_width: i32,
+    logical_height: i32,
+    pixel_width: i32,
+    pixel_height: i32,
     backing_scale_factor: f64,
+    revision: u64,
 ) -> i32 {
     let Ok(session) = session_from_ptr(session) else {
         return -1;
     };
 
-    if window_handle == 0 || view_handle == 0 || width <= 0 || height <= 0 || backing_scale_factor <= 0.0 {
+    let surface = HostSurfaceDescriptor {
+        window_handle,
+        view_handle,
+        logical_width,
+        logical_height,
+        pixel_width: pixel_width.max(1) as u32,
+        pixel_height: pixel_height.max(1) as u32,
+        backing_scale_factor,
+        revision,
+    };
+
+    if !surface.is_valid() {
         return session.set_error(
             "The Swift host provided an invalid embedded render surface descriptor.",
         );
     }
 
-    session.surface = Some(HostSurfaceDescriptor {
-        window_handle,
-        view_handle,
-        width,
-        height,
-        backing_scale_factor,
-    });
-
-    let pixel_width = ((width as f64) * backing_scale_factor).round() as i64;
-    let pixel_height = ((height as f64) * backing_scale_factor).round() as i64;
-    ui::video::set_host_viewport(pixel_width.max(1) as u32, pixel_height.max(1) as u32);
-
-    if session.has_active_runtime() {
-        if let Some(window) = session.sdl_window {
-            if let Err(message) = ui::video::sync_embedded_window(window.as_ptr() as _) {
-                return session.set_error(message);
-            }
-        }
+    if !session.has_active_runtime() {
+        session.set_surface_event(surface_event_message(
+            "pending",
+            &surface,
+            "reason=runtime-inactive",
+        ));
+        session.surface = Some(surface);
+        session.clear_error();
+        return 0;
     }
 
-    session.clear_error();
-    0
+    match apply_surface_update(session, surface) {
+        Ok(_) => {
+            session.clear_error();
+            0
+        }
+        Err(message) => session.set_error(message),
+    }
 }
 
 #[no_mangle]
@@ -500,14 +677,8 @@ pub unsafe extern "C" fn cinder64_bridge_open_rom(
 
         ui::video::ensure_video_subsystem_initialized();
         ui::video::load_vulkan_portability_library(molten_vk_library.as_deref())?;
-        ui::video::set_host_viewport(surface.pixel_width(), surface.pixel_height());
-        let embedded_window = ui::video::create_embedded_window(ui::video::EmbeddedWindowDescriptor {
-            cocoa_window: surface.window_handle as *mut std::ffi::c_void,
-            cocoa_view: surface.view_handle as *mut std::ffi::c_void,
-            width: surface.width,
-            height: surface.height,
-            high_pixel_density: surface.backing_scale_factor > 1.0,
-        })?;
+        ui::video::set_host_viewport(surface.pixel_width, surface.pixel_height);
+        let embedded_window = ui::video::create_embedded_window(surface.embedded_window_descriptor())?;
 
         session.settings = RuntimeSettings {
             fullscreen: fullscreen != 0,
@@ -521,6 +692,12 @@ pub unsafe extern "C" fn cinder64_bridge_open_rom(
         session.current_rom_path = Some(rom_path);
         session.runtime_directories = Some(runtime_directories.clone());
         session.sdl_window = Some(EmbeddedWindowHandle(embedded_window as usize));
+        session.last_applied_surface = Some(surface.clone());
+        session.set_surface_event(surface_event_message(
+            "attach",
+            &surface,
+            "viewport=ok sdl-window=create-ok wsi=initial-bind",
+        ));
         session.renderer_name = CString::new("gopher64 + parallel-rdp (embedded)").unwrap();
         session.frame_rate = 0.0;
         session.pump_tick_count = 0;
@@ -753,10 +930,6 @@ pub unsafe extern "C" fn cinder64_bridge_update_settings(
     session.settings.integer_scaling = integer_scaling != 0;
     session.settings.crt_filter = crt_filter != 0;
 
-    if session.has_active_runtime() {
-        ui::video::set_fullscreen(session.settings.fullscreen);
-    }
-
     session.clear_error();
     0
 }
@@ -803,6 +976,19 @@ pub unsafe extern "C" fn cinder64_bridge_last_error(session: *mut BridgeSession)
         Err(_) => b"The gopher64 bridge session handle was null.\0".as_ptr() as *const c_char,
     }
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn cinder64_bridge_surface_event(
+    session: *mut BridgeSession,
+) -> *const c_char {
+    match session_from_ptr(session) {
+        Ok(session) => session.last_surface_event.as_ptr(),
+        Err(_) => b"\0".as_ptr() as *const c_char,
+    }
+}
+
+#[cfg(test)]
+mod surface_state_tests;
 
 #[no_mangle]
 pub extern "C" fn cinder64_bridge_version() -> *const c_char {

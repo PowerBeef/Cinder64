@@ -10,54 +10,77 @@ struct RenderSurfaceView: View {
     let pumpRuntimeEvents: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Gameplay Surface")
+        ZStack {
+            RenderSurfaceHost(
+                surfaceChanged: surfaceChanged,
+                keyboardInputChanged: keyboardInputChanged,
+                capturesKeyboardInput: snapshot.activeROM != nil,
+                pumpRuntimeEvents: pumpRuntimeEvents
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .strokeBorder(ShellPalette.strongLine)
+            }
+
+            if let overlay = SurfaceOverlayPresentation.content(for: snapshot) {
+                SurfaceOverlayCard(content: overlay)
+                    .padding(18)
+            }
+        }
+        .frame(minHeight: 320)
+        .background(Color.black, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: ShellPalette.stageShadow, radius: 18, y: 8)
+    }
+}
+
+private struct SurfaceOverlayCard: View {
+    let content: SurfaceOverlayContent
+
+    var body: some View {
+        VStack(spacing: 12) {
+            if content.tone == .info {
+                ProgressView()
+                    .controlSize(.regular)
+                    .tint(toneColor)
+            } else {
+                Image(systemName: content.symbolName)
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundStyle(toneColor)
+            }
+
+            Text(content.title)
                 .font(.headline)
 
-            ZStack {
-                RenderSurfaceHost(
-                    surfaceChanged: surfaceChanged,
-                    keyboardInputChanged: keyboardInputChanged,
-                    capturesKeyboardInput: snapshot.activeROM != nil,
-                    pumpRuntimeEvents: pumpRuntimeEvents
-                )
-                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.06))
-                    }
-
-                VStack(spacing: 10) {
-                    Image(systemName: "gamecontroller.fill")
-                        .font(.system(size: 42))
-                    Text(snapshot.activeROM?.displayName ?? "Open a ROM to Begin")
-                        .font(.title3.weight(.semibold))
-                    Text(surfaceMessage)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 420)
-                }
-                .padding(24)
-            }
-            .frame(minHeight: 340)
+            Text(content.message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
         }
-        .padding(22)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .padding(.horizontal, 22)
+        .padding(.vertical, 18)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(toneColor.opacity(0.24))
+        }
+        .overlay(alignment: .top) {
+            Capsule()
+                .fill(toneColor.opacity(0.9))
+                .frame(width: 44, height: 4)
+                .padding(.top, 12)
+        }
     }
 
-    private var surfaceMessage: String {
-        switch snapshot.emulationState {
-        case .stopped:
-            "The native render host is attached. Opening a ROM will hand this surface to the embedded gopher64 bridge."
-        case .booting:
-            "Cinder64 is waiting for the embedded runtime to bind to the host surface."
-        case .paused:
-            "Emulation is loaded and paused."
-        case .running:
-            "Emulation is running."
-        case .failed:
-            "The embedded runtime stopped. Reopen the ROM to continue."
+    private var toneColor: Color {
+        switch content.tone {
+        case .info:
+            ShellPalette.accent
+        case .warning:
+            .orange
+        case .critical:
+            .red
         }
     }
 }
@@ -72,7 +95,7 @@ private struct RenderSurfaceHost: NSViewRepresentable {
         let view = RenderSurfaceHostingView()
         view.surfaceChanged = surfaceChanged
         view.keyboardInputChanged = keyboardInputChanged
-        view.capturesKeyboardInput = capturesKeyboardInput
+        view.setKeyboardCaptureEnabled(capturesKeyboardInput)
         view.pumpRuntimeEvents = pumpRuntimeEvents
         return view
     }
@@ -80,7 +103,7 @@ private struct RenderSurfaceHost: NSViewRepresentable {
     func updateNSView(_ nsView: RenderSurfaceHostingView, context: Context) {
         nsView.surfaceChanged = surfaceChanged
         nsView.keyboardInputChanged = keyboardInputChanged
-        nsView.capturesKeyboardInput = capturesKeyboardInput
+        nsView.setKeyboardCaptureEnabled(capturesKeyboardInput)
         nsView.pumpRuntimeEvents = pumpRuntimeEvents
         nsView.publishDescriptorIfPossible()
     }
@@ -96,9 +119,12 @@ private final class RenderSurfaceHostingView: NSView {
     var keyboardInputChanged: (EmbeddedKeyboardEvent) -> Void = { _ in }
     var capturesKeyboardInput = false
     var pumpRuntimeEvents: () -> Void = {}
+
     private var eventPumpTimer: Timer?
     private var localKeyboardEventMonitor: Any?
-    private var lastPublishedDescriptor: RenderSurfaceDescriptor?
+    private var lastCommittedDescriptor: RenderSurfaceDescriptor?
+    private var lastDeferredRevision: UInt64?
+    private var eventPumpDeferredForLiveResize = false
 
     override var acceptsFirstResponder: Bool {
         true
@@ -133,6 +159,15 @@ private final class RenderSurfaceHostingView: NSView {
     override func layout() {
         super.layout()
         publishDescriptorIfPossible()
+    }
+
+    override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        publishDescriptorIfPossible(forceCommit: true)
+        if eventPumpDeferredForLiveResize {
+            eventPumpDeferredForLiveResize = false
+            pumpRuntimeEvents()
+        }
     }
 
     override func viewDidChangeBackingProperties() {
@@ -184,51 +219,124 @@ private final class RenderSurfaceHostingView: NSView {
         super.flagsChanged(with: event)
     }
 
-    func publishDescriptorIfPossible() {
+    func publishDescriptorIfPossible(forceCommit: Bool = false) {
         let size = bounds.integral.size
         guard size.width > 0, size.height > 0, let window else {
-            if lastPublishedDescriptor != nil {
+            if lastCommittedDescriptor != nil {
                 Self.logger.info("render-surface invalidated")
-                lastPublishedDescriptor = nil
+                lastCommittedDescriptor = nil
+                lastDeferredRevision = nil
             }
             surfaceChanged(nil)
             return
         }
 
-        // Hosted Vulkan on macOS needs a live CAMetalLayer with a drawable size
-        // that tracks the NSView bounds and backing scale.
-        if let metalLayer = layer as? CAMetalLayer {
-            metalLayer.frame = bounds
-            metalLayer.contentsScale = window.backingScaleFactor
-            metalLayer.drawableSize = CGSize(
-                width: size.width * window.backingScaleFactor,
-                height: size.height * window.backingScaleFactor
-            )
+        let logicalWidth = Int(size.width)
+        let logicalHeight = Int(size.height)
+        let pixelWidth = max(Int((size.width * window.backingScaleFactor).rounded()), 1)
+        let pixelHeight = max(Int((size.height * window.backingScaleFactor).rounded()), 1)
+
+        let nextRevision: UInt64
+        if let lastCommittedDescriptor,
+           lastCommittedDescriptor.windowHandle == UInt(bitPattern: Unmanaged.passUnretained(window).toOpaque()),
+           lastCommittedDescriptor.viewHandle == UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque()),
+           lastCommittedDescriptor.logicalWidth == logicalWidth,
+           lastCommittedDescriptor.logicalHeight == logicalHeight,
+           lastCommittedDescriptor.pixelWidth == pixelWidth,
+           lastCommittedDescriptor.pixelHeight == pixelHeight,
+           lastCommittedDescriptor.backingScaleFactor == window.backingScaleFactor {
+            nextRevision = lastCommittedDescriptor.revision
+        } else {
+            nextRevision = (lastCommittedDescriptor?.revision ?? 0) + 1
         }
 
         let descriptor = RenderSurfaceDescriptor(
             windowHandle: UInt(bitPattern: Unmanaged.passUnretained(window).toOpaque()),
             viewHandle: UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque()),
-            width: Int(size.width),
-            height: Int(size.height),
-            backingScaleFactor: Double(window.backingScaleFactor)
+            logicalWidth: logicalWidth,
+            logicalHeight: logicalHeight,
+            pixelWidth: pixelWidth,
+            pixelHeight: pixelHeight,
+            backingScaleFactor: Double(window.backingScaleFactor),
+            revision: nextRevision
         )
-        guard descriptor != lastPublishedDescriptor else {
+
+        let decision = RenderSurfacePublicationPolicy.decide(
+            previousCommitted: lastCommittedDescriptor,
+            proposed: descriptor,
+            isLiveResize: inLiveResize && forceCommit == false
+        )
+
+        applySurfacePublicationDecision(decision, proposedDescriptor: descriptor)
+    }
+
+    private func applySurfacePublicationDecision(
+        _ decision: RenderSurfacePublicationDecision,
+        proposedDescriptor: RenderSurfaceDescriptor
+    ) {
+        switch decision {
+        case .clear:
+            lastCommittedDescriptor = nil
+            lastDeferredRevision = nil
+            surfaceChanged(nil)
+        case .noChange:
+            syncMetalLayer(
+                using: lastCommittedDescriptor ?? proposedDescriptor,
+                commitsDrawableSize: true
+            )
+        case let .defer(descriptor):
+            syncMetalLayer(
+                using: lastCommittedDescriptor ?? descriptor,
+                commitsDrawableSize: false
+            )
+            guard lastDeferredRevision != descriptor.revision else {
+                return
+            }
+            lastDeferredRevision = descriptor.revision
+            Self.logger.info(
+                "render-surface deferred revision=\(descriptor.revision) logical=\(descriptor.logicalWidth)x\(descriptor.logicalHeight) pixel=\(descriptor.pixelWidth)x\(descriptor.pixelHeight) liveResize=true"
+            )
+        case let .publish(descriptor, kind):
+            syncMetalLayer(using: descriptor, commitsDrawableSize: true)
+            lastCommittedDescriptor = descriptor
+            lastDeferredRevision = nil
+            Self.logger.info(
+                "render-surface published kind=\(kind.logValue, privacy: .public) revision=\(descriptor.revision) logical=\(descriptor.logicalWidth)x\(descriptor.logicalHeight) pixel=\(descriptor.pixelWidth)x\(descriptor.pixelHeight) scale=\(descriptor.backingScaleFactor, format: .fixed(precision: 2))"
+            )
+            surfaceChanged(descriptor)
+        }
+    }
+
+    private func syncMetalLayer(using descriptor: RenderSurfaceDescriptor, commitsDrawableSize: Bool) {
+        guard let window, let metalLayer = layer as? CAMetalLayer else {
             return
         }
 
-        let backingLayerDescription = layer.map { String(describing: type(of: $0)) } ?? "nil"
-        let drawableSize: CGSize
-        if let metalLayer = layer as? CAMetalLayer {
-            drawableSize = metalLayer.drawableSize
+        metalLayer.frame = bounds
+        metalLayer.contentsScale = window.backingScaleFactor
+
+        let drawableDescriptor = if commitsDrawableSize {
+            descriptor
         } else {
-            drawableSize = .zero
+            lastCommittedDescriptor ?? descriptor
         }
-        Self.logger.info(
-            "render-surface published size=\(descriptor.width)x\(descriptor.height) scale=\(descriptor.backingScaleFactor, format: .fixed(precision: 2)) layer=\(backingLayerDescription, privacy: .public) drawable=\(Int(drawableSize.width))x\(Int(drawableSize.height))"
+
+        metalLayer.drawableSize = CGSize(
+            width: drawableDescriptor.pixelWidth,
+            height: drawableDescriptor.pixelHeight
         )
-        lastPublishedDescriptor = descriptor
-        surfaceChanged(descriptor)
+    }
+
+    func setKeyboardCaptureEnabled(_ capturesKeyboardInput: Bool) {
+        let shouldRefocus = RenderSurfaceKeyboardFocusPolicy.shouldRefocus(
+            previousCapturesKeyboardInput: self.capturesKeyboardInput,
+            currentCapturesKeyboardInput: capturesKeyboardInput
+        )
+        self.capturesKeyboardInput = capturesKeyboardInput
+
+        if shouldRefocus {
+            focusHostForKeyboardInput()
+        }
     }
 
     private func configureEventPumpIfNeeded() {
@@ -324,6 +432,24 @@ private final class RenderSurfaceHostingView: NSView {
     }
 
     @objc private func handleEventPumpTimer(_: Timer) {
+        if inLiveResize {
+            eventPumpDeferredForLiveResize = true
+            return
+        }
+
         pumpRuntimeEvents()
+    }
+}
+
+private extension RenderSurfaceChangeKind {
+    var logValue: String {
+        switch self {
+        case .attach:
+            "attach"
+        case .resize:
+            "resize"
+        case .reattach:
+            "reattach"
+        }
     }
 }

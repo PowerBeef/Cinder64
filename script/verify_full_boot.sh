@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/script/boot_key_profiles.sh"
+
 APP_NAME="Cinder64"
 APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
 DEFAULT_ROM="$ROOT_DIR/Super Mario 64 (USA)/Super Mario 64 (USA).z64"
@@ -12,10 +14,8 @@ RUNTIME_LOG_FILE="$APP_SUPPORT_ROOT/logs/runtime.log"
 RECENT_GAMES_FILE="$APP_SUPPORT_ROOT/recent-games.json"
 CRASH_REPORT_DIR="$HOME/Library/Logs/DiagnosticReports"
 READY_LINE="Opened Super Mario 64 (USA) using"
-SCRIPTED_KEYS="4500:40:down;4600:40:up;7000:225:down;7100:225:up"
-# Timings: let the 3D logo finish its opening animation, press Start (Return → SDL 40)
-# to leave the title, wait for the file-select screen, then press A (L-Shift → SDL 225)
-# to enter the default save slot.
+KEY_PROFILE_NAME="${CINDER64_BOOT_KEY_PROFILE:-smoke}"
+SCRIPTED_KEYS="$(resolve_scripted_key_profile "$KEY_PROFILE_NAME")"
 #
 # NOTE on screenshots: calling `screencapture -l <windowID>` against this app while
 # gopher64 is running causes parallel-rdp's check_callback() to observe `emu_running
@@ -181,6 +181,7 @@ fi
 echo "full-boot:ok"
 echo "rom_path=$ROM_PATH"
 echo "app_support_root=$APP_SUPPORT_ROOT"
+echo "key_profile=$KEY_PROFILE_NAME"
 echo "frame_count_first=$FIRST_FRAME"
 echo "frame_count_last=$LAST_FRAME"
 echo "frame_count_samples=$SAMPLE_COUNT"

@@ -23,6 +23,7 @@ struct PerGameSettingsStoreTests {
         let settings = try #require(try store.loadSettings(for: identity))
 
         #expect(settings.startFullscreen)
+        #expect(settings.windowScale == 1)
         #expect(settings.muteAudio)
         #expect(settings.speedPercent == 85)
         #expect(settings.upscaleMultiplier == 2)
