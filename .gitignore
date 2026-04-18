@@ -1,0 +1,12 @@
+.DS_Store
+/.build
+/Packages
+/dist
+/ThirdParty/gopher64/cinder64_bridge/target
+.codex/
+xcuserdata/
+DerivedData/
+.swiftpm/configuration/registries.json
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.netrc
+/Super Mario 64 (USA)/

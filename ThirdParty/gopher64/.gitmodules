@@ -1,0 +1,11 @@
+[submodule "parallel-rdp/parallel-rdp-standalone"]
+	path = parallel-rdp/parallel-rdp-standalone
+	url = https://github.com/Themaister/parallel-rdp-standalone.git
+	branch = master
+[submodule "src/compat/sse2neon"]
+	path = src/compat/sse2neon
+	url = https://github.com/DLTcollab/sse2neon.git
+	branch = master
+[submodule "retroachievements/rcheevos"]
+	path = retroachievements/rcheevos
+	url = https://github.com/RetroAchievements/rcheevos.git

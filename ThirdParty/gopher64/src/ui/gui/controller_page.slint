@@ -1,0 +1,125 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: MIT
+
+import { CheckBox, ComboBox, Button, HorizontalBox, VerticalBox, GroupBox } from "std-widgets.slint";
+import { Page } from "page.slint";
+import { State } from "localgame_page.slint";
+
+export global ControllerData {
+    in-out property <bool> emulate_vru;
+    in-out property <[bool]> controller_enabled;
+    in-out property <[bool]> transferpak;
+    in-out property <[int]> selected_profile_binding: [-1, -1, -1, -1];
+    in-out property <[string]> input_profiles;
+    in-out property <[string]> controller_names;
+    in-out property <[int]> selected_controller;
+    in-out property <[bool]> controller_changed;
+    in-out property <bool> blank_profiles;
+}
+
+export component ControllerConfig inherits Page {
+    callback input_profile_button_clicked;
+    title: @tr("Controller Configuration");
+
+    VerticalBox {
+        alignment: start;
+        HorizontalBox {
+            alignment: start;
+            Button {
+                text: @tr("Configure Input Profile");
+                enabled: !State.game_running;
+                clicked => {
+                    input_profile_button_clicked();
+                }
+            }
+        }
+
+        Rectangle { }
+
+        HorizontalBox {
+            GroupBox {
+                title: @tr("Port");
+                VerticalLayout {
+                    alignment: space-between;
+                    for player in [0, 1, 2, 3]: Text {
+                        text: player + 1;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            GroupBox {
+                title: @tr("Enabled");
+                VerticalLayout {
+                    alignment: space-between;
+                    for player in [0, 1, 2, 3]: CheckBox {
+                        checked: ControllerData.controller_enabled[player];
+                        toggled => {
+                            ControllerData.controller_enabled[player] = self.checked;
+                        }
+                    }
+                }
+            }
+
+            GroupBox {
+                title: @tr("Emulate VRU");
+                VerticalLayout {
+                    alignment: space-between;
+                    for valid in [false, false, false, true]: CheckBox {
+                        enabled: valid;
+                        checked: valid && ControllerData.emulate_vru;
+                        toggled => {
+                            ControllerData.emulate_vru = self.checked;
+                        }
+                    }
+                }
+            }
+
+            GroupBox {
+                title: @tr("Transfer Pak");
+                VerticalLayout {
+                    alignment: space-between;
+                    for player in [0, 1, 2, 3]: CheckBox {
+                        checked: ControllerData.transferpak[player];
+                        toggled => {
+                            ControllerData.transferpak[player] = self.checked;
+                        }
+                    }
+                }
+            }
+
+            if !ControllerData.blank_profiles: GroupBox {
+                title: @tr("Profile");
+                horizontal-stretch: 0.25;
+                VerticalLayout {
+                    alignment: space-between;
+                    for player in [0, 1, 2, 3]: ComboBox {
+                        model: ControllerData.input_profiles;
+                        min-width: self.preferred-width > 150px ? self.preferred-width : 150px;
+                        current-index: ControllerData.selected_profile_binding[player];
+                        selected => {
+                            ControllerData.selected_profile_binding[player] = self.current-index;
+                        }
+                    }
+                }
+            }
+
+            GroupBox {
+                title: @tr("Controller");
+                horizontal-stretch: 0.75;
+                VerticalLayout {
+                    alignment: space-between;
+                    for player in [0, 1, 2, 3]: ComboBox {
+                        model: ControllerData.controller_names;
+                        min-width: self.preferred-width > 300px ? self.preferred-width : 300px;
+                        current-index: ControllerData.selected_controller[player];
+                        selected => {
+                            ControllerData.selected_controller[player] = self.current-index;
+                            ControllerData.controller_changed[player] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

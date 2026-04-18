@@ -1,0 +1,495 @@
+use crate::retroachievements;
+use crate::ui;
+use slint::Model;
+
+slint::include_modules!();
+
+pub const N64_EXTENSIONS: [&str; 12] = [
+    "n64", "v64", "z64", "7z", "zip", "bin", "N64", "V64", "Z64", "7Z", "ZIP", "BIN",
+];
+
+#[derive(serde::Deserialize)]
+struct GithubData {
+    tag_name: String,
+}
+
+pub struct NetplayDevice {
+    pub peer_addr: std::net::SocketAddr,
+    pub player_number: u8,
+}
+
+pub struct GbPaths {
+    pub rom: [Option<std::path::PathBuf>; 4],
+    pub ram: [Option<std::path::PathBuf>; 4],
+}
+
+#[derive(Clone)]
+pub struct GameSettings {
+    pub overclock: bool,
+    pub disable_expansion_pak: bool,
+    pub cheats: std::collections::HashMap<String, Option<String>>,
+    pub load_savestate_slot: Option<u32>,
+}
+
+#[derive(Clone)]
+pub struct RASettings {
+    pub enabled: bool,
+    pub hardcore: bool,
+    pub challenge: bool,
+    pub leaderboard: bool,
+}
+
+fn check_latest_version(weak: slint::Weak<AppWindow>) {
+    let client = reqwest::Client::builder()
+        .user_agent(env!("CARGO_PKG_NAME"))
+        .build()
+        .unwrap();
+    let task = client
+        .get("https://api.github.com/repos/gopher64/gopher64/releases/latest")
+        .send();
+    tokio::spawn(async move {
+        let response = task.await;
+        if let Ok(response) = response {
+            let data: Result<GithubData, reqwest::Error> = response.json().await;
+
+            let latest_version = if let Ok(data) = data {
+                semver::Version::parse(&data.tag_name[1..]).unwrap()
+            } else {
+                semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()
+            };
+            let current_version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+            if current_version < latest_version {
+                weak.upgrade_in_event_loop(move |handle| handle.set_has_update(true))
+                    .unwrap();
+            }
+        }
+    });
+}
+
+fn local_game_window(app: &AppWindow, controller_paths: &[Option<String>]) {
+    let dirs = ui::get_dirs();
+    let weak = app.as_weak();
+    let controller_paths = controller_paths.to_owned();
+    app.on_open_rom_button_clicked(move || {
+        let controller_paths = controller_paths.clone();
+        weak.upgrade_in_event_loop(move |handle| {
+            save_settings(&handle, &controller_paths);
+            open_rom(&handle)
+        })
+        .unwrap();
+    });
+
+    let saves_path = dirs.data_dir.join("saves");
+    app.on_saves_folder_button_clicked(move || {
+        open::that_detached(saves_path.clone()).unwrap();
+    });
+}
+
+fn input_profiles(config: &ui::config::Config) -> Vec<String> {
+    let mut profiles = vec![];
+    for key in config.input.input_profiles.keys() {
+        profiles.push(key.clone())
+    }
+    profiles
+}
+
+fn settings_window(app: &AppWindow, config: &ui::config::Config) {
+    app.set_integer_scaling(config.video.integer_scaling);
+    app.set_fullscreen(config.video.fullscreen);
+    app.set_widescreen(config.video.widescreen);
+    app.set_apply_crt_shader(config.video.crt);
+    app.set_overclock_n64_cpu(config.emulation.overclock);
+    app.set_disable_expansion_pak(config.emulation.disable_expansion_pak);
+    app.set_emulate_usb(config.emulation.usb);
+    let combobox_value = match config.video.upscale {
+        1 => 0,
+        2 => 1,
+        4 => 2,
+        8 => 3,
+        _ => 0,
+    };
+    app.set_resolution(combobox_value);
+
+    if let Some(rom_dir_str) = config.rom_dir.to_str() {
+        app.set_rom_dir(rom_dir_str.into());
+    }
+}
+
+fn update_input_profiles(weak: &slint::Weak<AppWindow>, config: &ui::config::Config) {
+    let profiles = input_profiles(config);
+    let config_bindings = config.input.input_profile_binding.clone();
+    let weak2 = weak.clone();
+    weak.upgrade_in_event_loop(move |handle| {
+        let profile_bindings = slint::VecModel::default();
+        for (i, input_profile_binding) in handle.get_selected_profile_binding().iter().enumerate() {
+            let currently_selected = handle
+                .get_input_profiles()
+                .row_data(input_profile_binding as usize)
+                .unwrap_or(config_bindings[i].clone().into())
+                .to_string();
+            let position = profiles
+                .iter()
+                .position(|profile| *profile == currently_selected);
+            profile_bindings.push(position.unwrap() as i32);
+        }
+
+        let input_profiles = slint::VecModel::default();
+        for profile in profiles {
+            input_profiles.push(profile.into());
+        }
+        let input_profiles_model: std::rc::Rc<slint::VecModel<slint::SharedString>> =
+            std::rc::Rc::new(input_profiles);
+        handle.set_input_profiles(slint::ModelRc::from(input_profiles_model));
+
+        let input_profile_binding_model: std::rc::Rc<slint::VecModel<i32>> =
+            std::rc::Rc::new(profile_bindings);
+        handle.set_selected_profile_binding(slint::ModelRc::from(input_profile_binding_model));
+
+        // this is a workaround to make the input profile combobox update
+        handle.set_blank_profiles(true);
+        slint::Timer::single_shot(std::time::Duration::from_millis(200), move || {
+            weak2
+                .upgrade_in_event_loop(move |handle| {
+                    handle.set_blank_profiles(false);
+                })
+                .unwrap();
+        });
+    })
+    .unwrap();
+}
+
+fn controller_window(
+    app: &AppWindow,
+    config: &ui::config::Config,
+    controller_names: &Vec<String>,
+    controller_paths: &[Option<String>],
+) {
+    let controller_enabled_model: std::rc::Rc<slint::VecModel<bool>> = std::rc::Rc::new(
+        slint::VecModel::from(config.input.controller_enabled.to_vec()),
+    );
+    app.set_emulate_vru(config.input.emulate_vru);
+
+    app.set_controller_enabled(slint::ModelRc::from(controller_enabled_model));
+
+    let transferpak_enabled_model: std::rc::Rc<slint::VecModel<bool>> =
+        std::rc::Rc::new(slint::VecModel::from(config.input.transfer_pak.to_vec()));
+    app.set_transferpak(slint::ModelRc::from(transferpak_enabled_model));
+
+    update_input_profiles(&app.as_weak(), config);
+
+    let controllers = slint::VecModel::default();
+    for controller in controller_names {
+        controllers.push(controller.into());
+    }
+    let controller_names_model: std::rc::Rc<slint::VecModel<slint::SharedString>> =
+        std::rc::Rc::new(controllers);
+    app.set_controller_names(slint::ModelRc::from(controller_names_model));
+
+    let controller_changed = slint::VecModel::default();
+    let selected_controllers = slint::VecModel::default();
+    for selected in config.input.controller_assignment.iter() {
+        let mut found = false;
+        for (i, path) in controller_paths.iter().enumerate() {
+            if selected == path {
+                selected_controllers.push(i as i32);
+                found = true;
+                continue;
+            }
+        }
+        if !found {
+            selected_controllers.push(0);
+        }
+        controller_changed.push(false);
+    }
+    let selected_controllers_model: std::rc::Rc<slint::VecModel<i32>> =
+        std::rc::Rc::new(selected_controllers);
+    app.set_selected_controller(slint::ModelRc::from(selected_controllers_model));
+
+    let controller_changed_model: std::rc::Rc<slint::VecModel<bool>> =
+        std::rc::Rc::new(controller_changed);
+    app.set_controller_changed(slint::ModelRc::from(controller_changed_model));
+
+    let weak_app = app.as_weak();
+    app.on_input_profile_button_clicked(move || {
+        let dialog = InputProfileDialog::new().unwrap();
+        dialog.set_deadzone(ui::input::DEADZONE_DEFAULT);
+        let weak_dialog = dialog.as_weak();
+        let weak_app = weak_app.clone();
+        dialog.on_profile_creation_button_clicked(move || {
+            let weak_app = weak_app.clone();
+            weak_dialog
+                .upgrade_in_event_loop(move |handle| {
+                    handle.hide().unwrap();
+                    let profile_name = handle.get_profile_name();
+                    let dinput = handle.get_dinput();
+                    let deadzone = handle.get_deadzone();
+
+                    tokio::spawn(async move {
+                        let mut command =
+                            std::process::Command::new(std::env::current_exe().unwrap());
+                        command.args([
+                            "--configure-input-profile",
+                            &profile_name,
+                            "--deadzone",
+                            &deadzone.to_string(),
+                        ]);
+                        if dinput {
+                            command.arg("--use-dinput");
+                        }
+                        if !command.status().unwrap().success() {
+                            eprintln!("Failed to configure input profile");
+                        }
+                        let game_ui = ui::Ui::new();
+                        update_input_profiles(&weak_app, &game_ui.config);
+                    });
+                })
+                .unwrap();
+        });
+        dialog.show().unwrap();
+    });
+}
+
+pub fn save_settings(app: &AppWindow, controller_paths: &[Option<String>]) {
+    let mut config = ui::config::Config::new();
+    config.video.integer_scaling = app.get_integer_scaling();
+    config.video.fullscreen = app.get_fullscreen();
+    config.video.widescreen = app.get_widescreen();
+    config.video.crt = app.get_apply_crt_shader();
+    config.emulation.overclock = app.get_overclock_n64_cpu();
+    config.emulation.disable_expansion_pak = app.get_disable_expansion_pak();
+    config.emulation.usb = app.get_emulate_usb();
+    let upscale_values = [1, 2, 4, 8];
+    config.video.upscale = upscale_values[app.get_resolution() as usize];
+
+    config.input.emulate_vru = app.get_emulate_vru();
+    for (i, controller_enabled) in app.get_controller_enabled().iter().enumerate() {
+        config.input.controller_enabled[i] = controller_enabled;
+    }
+    for (i, transferpak_enabled) in app.get_transferpak().iter().enumerate() {
+        config.input.transfer_pak[i] = transferpak_enabled;
+    }
+    for (i, input_profile_binding) in app.get_selected_profile_binding().iter().enumerate() {
+        config.input.input_profile_binding[i] = app
+            .get_input_profiles()
+            .row_data(input_profile_binding as usize)
+            .unwrap()
+            .to_string();
+    }
+
+    for (i, selected_controller) in app.get_selected_controller().iter().enumerate() {
+        if app.get_controller_changed().row_data(i).unwrap_or(false) {
+            config.input.controller_assignment[i] =
+                controller_paths[selected_controller as usize].clone();
+        }
+    }
+}
+
+fn about_window(app: &AppWindow) {
+    app.on_wiki_button_clicked(move || {
+        open::that_detached("https://github.com/gopher64/gopher64/wiki").unwrap();
+    });
+    app.on_discord_button_clicked(move || {
+        open::that_detached("https://discord.gg/9RGXq8W8JQ").unwrap();
+    });
+    app.on_patreon_button_clicked(move || {
+        open::that_detached("https://patreon.com/loganmc10").unwrap();
+    });
+    app.on_github_sponsors_button_clicked(move || {
+        open::that_detached("https://github.com/sponsors/loganmc10").unwrap();
+    });
+    app.on_source_code_button_clicked(move || {
+        open::that_detached("https://github.com/gopher64/gopher64").unwrap();
+    });
+    app.on_newversion_button_clicked(move || {
+        open::that_detached("https://github.com/gopher64/gopher64/releases/latest").unwrap();
+    });
+    app.set_version(format!("Version: {}", env!("GIT_DESCRIBE")).into());
+    if std::env::var("FLATPAK_ID").is_err() {
+        check_latest_version(app.as_weak());
+    }
+}
+
+pub fn app_window() {
+    let app = AppWindow::new().unwrap();
+    about_window(&app);
+    retroachievements::ra_window(&app);
+    let mut controller_paths;
+    {
+        let game_ui = ui::Ui::new();
+        let mut controller_names = ui::input::get_controller_names(&game_ui);
+        controller_names.insert(0, "None".into());
+        controller_paths = ui::input::get_controller_paths(&game_ui);
+        controller_paths.insert(0, None);
+        settings_window(&app, &game_ui.config);
+        controller_window(&app, &game_ui.config, &controller_names, &controller_paths);
+    }
+    local_game_window(&app, &controller_paths);
+    ui::netplay::netplay_window(&app, &controller_paths);
+    ui::cheats::cheats_window(&app);
+    app.run().unwrap();
+    save_settings(&app, &controller_paths);
+}
+
+pub fn run_rom(
+    gb_paths: GbPaths,
+    file_path: std::path::PathBuf,
+    game_settings: GameSettings,
+    netplay: Option<NetplayDevice>,
+    ra_settings: RASettings,
+    weak: slint::Weak<AppWindow>,
+) {
+    tokio::spawn(async move {
+        weak.upgrade_in_event_loop(move |handle| handle.set_game_running(true))
+            .unwrap();
+
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--overclock",
+            &game_settings.overclock.to_string(),
+            "--disable-expansion-pak",
+            &game_settings.disable_expansion_pak.to_string(),
+        ]);
+        let cheats_path = ui::get_dirs().cache_dir.join("cheats.json");
+        if let Some(netplay_device) = netplay {
+            let f = std::fs::File::create(cheats_path.to_str().unwrap()).unwrap();
+            serde_json::to_writer_pretty(f, &game_settings.cheats).unwrap();
+
+            command.args([
+                "--netplay-peer-addr",
+                &netplay_device.peer_addr.to_string(),
+                "--netplay-player-number",
+                &netplay_device.player_number.to_string(),
+                "--cheats",
+                cheats_path.to_str().unwrap(),
+            ]);
+        }
+        if ra_settings.enabled {
+            command.args([
+                "--ra-username",
+                retroachievements::get_username(),
+                "--ra-token",
+                retroachievements::get_token(),
+            ]);
+            if ra_settings.hardcore {
+                command.args(["--ra-hardcore"]);
+            }
+            if ra_settings.challenge {
+                command.args(["--ra-challenge"]);
+            }
+            if ra_settings.leaderboard {
+                command.args(["--ra-leaderboard"]);
+            }
+        }
+
+        for i in 0..4 {
+            if gb_paths.rom[i].is_some() && gb_paths.ram[i].is_some() {
+                command.args([
+                    "--gb-rom",
+                    gb_paths.rom[i].as_ref().unwrap().to_str().unwrap(),
+                    "--gb-ram",
+                    gb_paths.ram[i].as_ref().unwrap().to_str().unwrap(),
+                ]);
+            }
+        }
+
+        if !command
+            .arg(file_path.to_str().unwrap())
+            .status()
+            .unwrap()
+            .success()
+        {
+            eprintln!("Failed to run game");
+        }
+
+        let _ = std::fs::remove_file(cheats_path.to_str().unwrap());
+
+        weak.upgrade_in_event_loop(move |handle| {
+            if let Some(rom_dir) = file_path.parent().unwrap().to_str() {
+                handle.set_rom_dir(rom_dir.into());
+            }
+            handle.set_game_running(false);
+        })
+        .unwrap();
+    });
+}
+
+fn open_rom(app: &AppWindow) {
+    let rom_dir = app.get_rom_dir();
+    let select_rom = if !rom_dir.is_empty()
+        && let Ok(exists) = std::fs::exists(&rom_dir)
+        && exists
+    {
+        rfd::AsyncFileDialog::new().set_directory(rom_dir)
+    } else {
+        rfd::AsyncFileDialog::new()
+    }
+    .set_title("Select ROM")
+    .add_filter("ROM files", &N64_EXTENSIONS)
+    .pick_file();
+    let mut select_gb_rom = [None, None, None, None];
+    let mut select_gb_ram = [None, None, None, None];
+
+    for (i, transfer_pak_enabled) in app.get_transferpak().iter().enumerate() {
+        if transfer_pak_enabled {
+            select_gb_rom[i] = Some(
+                rfd::AsyncFileDialog::new()
+                    .set_title(format!("GB ROM P{}", i + 1))
+                    .add_filter("GB ROM files", &["gb", "gbc", "GB", "GBC"])
+                    .pick_file(),
+            );
+            select_gb_ram[i] = Some(
+                rfd::AsyncFileDialog::new()
+                    .set_title(format!("GB RAM P{}", i + 1))
+                    .add_filter("GB RAM files", &["sav", "ram", "srm", "SAV", "RAM", "SRM"])
+                    .pick_file(),
+            );
+        }
+    }
+
+    let overclock = app.get_overclock_n64_cpu();
+    let disable_expansion_pak = app.get_disable_expansion_pak();
+    let ra_enabled = app.get_ra_enabled();
+    let ra_hardcore = app.get_ra_hardcore();
+    let ra_challenge = app.get_ra_challenge();
+    let ra_leaderboard = app.get_ra_leaderboard();
+
+    let weak = app.as_weak();
+    tokio::spawn(async move {
+        if let Some(file) = select_rom.await {
+            let mut gb_rom_path = [None, None, None, None];
+            let mut gb_ram_path = [None, None, None, None];
+
+            for i in 0..4 {
+                if let (Some(gb_rom), Some(gb_ram)) =
+                    (select_gb_rom[i].as_mut(), select_gb_ram[i].as_mut())
+                    && let (Some(gb_rom), Some(gb_ram)) = (gb_rom.await, gb_ram.await)
+                {
+                    gb_rom_path[i] = Some(gb_rom.path().to_path_buf());
+                    gb_ram_path[i] = Some(gb_ram.path().to_path_buf());
+                }
+            }
+
+            run_rom(
+                GbPaths {
+                    rom: gb_rom_path,
+                    ram: gb_ram_path,
+                },
+                file.path().to_path_buf(),
+                GameSettings {
+                    overclock,
+                    disable_expansion_pak,
+                    cheats: std::collections::HashMap::new(), // will be filled in later
+                    load_savestate_slot: None,
+                },
+                None,
+                RASettings {
+                    enabled: ra_enabled,
+                    hardcore: ra_hardcore,
+                    challenge: ra_challenge,
+                    leaderboard: ra_leaderboard,
+                },
+                weak,
+            );
+        }
+    });
+}

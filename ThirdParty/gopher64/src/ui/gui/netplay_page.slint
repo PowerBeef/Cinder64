@@ -1,0 +1,97 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: MIT
+
+import { StandardButton, VerticalBox, HorizontalBox, Button, LineEdit } from "std-widgets.slint";
+import { Page } from "page.slint";
+
+export global NetplayData {
+    in-out property <[string]> server_names;
+    in-out property <[string]> server_urls;
+    in-out property <string> player_name;
+    in-out property <string> game_name;
+    in-out property <string> game_hash;
+    in-out property <string> game_cheats;
+    in-out property <string> rom_path;
+    in-out property <string> password;
+    in-out property <string> peer_addr;
+    in-out property <bool> pending_session;
+    in-out property <bool> pending_refresh;
+    in-out property <string> session_name;
+    in-out property <[[StandardListViewItem]]> sessions;
+    in-out property <[string]> room_urls;
+    in-out property <[int]> room_ports;
+    in-out property <int> current_session: -1;
+    in-out property <string> rom_dir;
+    in-out property <string> custom_server_url;
+}
+
+export component Netplay inherits Page {
+    callback create_session_button_clicked;
+    callback join_session_button_clicked;
+    callback netplay_discord_button_clicked;
+    callback netplay_feedback_button_clicked;
+    title: @tr("Netplay");
+
+    VerticalBox {
+        alignment: start;
+        HorizontalBox {
+            alignment: center;
+            Button {
+                text: @tr("Create Session");
+                clicked => {
+                    create_session_button_clicked();
+                }
+            }
+        }
+
+        HorizontalBox {
+            alignment: center;
+            Button {
+                text: @tr("Join Session");
+                clicked => {
+                    join_session_button_clicked();
+                }
+            }
+        }
+
+        Rectangle {
+            height: 20px;
+        }
+
+        HorizontalBox {
+            alignment: center;
+            Button {
+                text: @tr("Netplay Discord Channel");
+                clicked => {
+                    netplay_discord_button_clicked();
+                }
+            }
+
+            Button {
+                text: @tr("Provide Feedback");
+                clicked => {
+                    netplay_feedback_button_clicked();
+                }
+            }
+        }
+    }
+}
+
+export component CustomNetplayServer inherits Dialog {
+    in-out property custom_server_url <=> NetplayData.custom_server_url;
+    title: @tr("Custom Netplay Server");
+    preferred-width: 400px;
+    callback ok_clicked(string);
+    server_url := LineEdit {
+        text: NetplayData.custom_server_url;
+        placeholder-text: "example.com:45000";
+    }
+
+    StandardButton {
+        kind: ok;
+        clicked => {
+            NetplayData.custom_server_url = server_url.text;
+            ok_clicked(NetplayData.custom_server_url);
+        }
+    }
+}
