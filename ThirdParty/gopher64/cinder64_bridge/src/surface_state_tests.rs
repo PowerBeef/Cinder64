@@ -1,4 +1,10 @@
-use crate::{HostSurfaceDescriptor, SurfaceApplyAction, determine_surface_apply_action};
+use crate::{
+    HostSurfaceDescriptor,
+    SDLWindowOwnership,
+    SurfaceApplyAction,
+    determine_surface_apply_action,
+    should_destroy_sdl_window_on_stop,
+};
 
 fn make_surface(
     window_handle: usize,
@@ -76,4 +82,14 @@ fn invalid_descriptor_is_rejected_cleanly() {
     let invalid = make_surface(0, 0, 0, 0, 0, 0, 0.0, 0);
 
     assert!(!invalid.is_valid());
+}
+
+#[test]
+fn host_owned_sdl_windows_are_preserved_when_stopping() {
+    assert!(!should_destroy_sdl_window_on_stop(SDLWindowOwnership::HostOwned));
+}
+
+#[test]
+fn runtime_owned_sdl_windows_are_destroyed_when_stopping() {
+    assert!(should_destroy_sdl_window_on_stop(SDLWindowOwnership::RuntimeOwned));
 }

@@ -6,25 +6,30 @@ import SwiftUI
 struct Cinder64App: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var session: EmulationSession
+    @State private var closeGameCoordinator: CloseGameCoordinator
     @State private var mainWindowController = MainWindowController()
 
     init() {
         do {
             let persistence = try PersistenceStore.live()
-            _session = State(initialValue: EmulationSession(
+            let session = EmulationSession(
                 coreHost: Gopher64CoreHost(logStore: persistence.logStore),
                 persistenceStore: persistence
-            ))
+            )
+            _session = State(initialValue: session)
+            _closeGameCoordinator = State(initialValue: CloseGameCoordinator(session: session))
         } catch {
             let fallback = PersistenceStore(
                 recentGamesStore: RecentGamesStore(storageURL: FileManager.default.temporaryDirectory.appending(path: "cinder64-fallback-recent.json")),
                 saveStateStore: SaveStateMetadataStore(storageURL: FileManager.default.temporaryDirectory.appending(path: "cinder64-fallback-savestates.json"))
             )
             fallback.logStore.record("error", "Failed to build live persistence: \(error.localizedDescription)")
-            _session = State(initialValue: EmulationSession(
+            let session = EmulationSession(
                 coreHost: Gopher64CoreHost(logStore: fallback.logStore),
                 persistenceStore: fallback
-            ))
+            )
+            _session = State(initialValue: session)
+            _closeGameCoordinator = State(initialValue: CloseGameCoordinator(session: session))
         }
     }
 
@@ -32,7 +37,12 @@ struct Cinder64App: App {
         Window("Cinder64", id: "main") {
             ContentView(
                 session: session,
+                closeGameCoordinator: closeGameCoordinator,
                 openROMRequested: { Task { await openROM() } },
+                returnHomeRequested: { closeGameCoordinator.requestCloseGame(.returnHome) },
+                completePendingProtectedLaunchRequested: { shouldResumeProtectedSave in
+                    Task { await completePendingProtectedLaunch(shouldResumeProtectedSave: shouldResumeProtectedSave) }
+                },
                 launchROMRequested: { url in
                     LaunchRequestBroker.shared.enqueue(url)
                 },
@@ -41,14 +51,18 @@ struct Cinder64App: App {
                 .background {
                     MainWindowAccessor(
                         displayMode: MainWindowDisplayMode(settings: session.activeSettings),
+                        chromeMode: MainWindowChromeMode(shellMode: ShellPresentation.mode(for: session.snapshot)),
                         controller: mainWindowController
                     )
                 }
                 .frame(minWidth: 860, minHeight: 560)
                 .task {
                     await LaunchRequestBroker.shared.installHandler(handleLaunchRequest)
+                    configureCloseGameInterceptors()
                 }
         }
+        .restorationBehavior(.disabled)
+        .defaultLaunchBehavior(.presented)
         .commands {
             CommandGroup(after: .newItem) {
                 Button("Open ROM…") {
@@ -112,10 +126,12 @@ struct Cinder64App: App {
 
     private func handleLaunchRequest(_ url: URL) async {
         do {
-            try await session.openROM(url: url)
-            reactivateMainWindow()
-            mainWindowController.apply(mode: MainWindowDisplayMode(settings: session.activeSettings))
-            startScriptedKeyPlaybackIfNeeded()
+            switch try closeGameCoordinator.prepareLaunchRequest(for: url) {
+            case .launchNormally:
+                try await launchROM(url: url, loadProtectedCloseSave: false)
+            case .promptForProtectedResume:
+                reactivateMainWindow()
+            }
         } catch {
             session.presentWarning(title: "Unable to Launch ROM", message: error.localizedDescription)
         }
@@ -140,6 +156,72 @@ struct Cinder64App: App {
 
         Task {
             try? await session.updateSettings(settings)
+        }
+    }
+
+    private func launchROM(url: URL, loadProtectedCloseSave: Bool) async throws {
+        try await session.openROM(url: url)
+        if loadProtectedCloseSave {
+            try await session.loadProtectedCloseState()
+        }
+        reactivateMainWindow()
+        mainWindowController.apply(mode: MainWindowDisplayMode(settings: session.activeSettings))
+        startScriptedKeyPlaybackIfNeeded()
+    }
+
+    private func completePendingProtectedLaunch(shouldResumeProtectedSave: Bool) async {
+        guard let pendingLaunch = closeGameCoordinator.resolvePendingLaunch(
+            shouldResumeProtectedSave: shouldResumeProtectedSave
+        ) else {
+            return
+        }
+
+        do {
+            try await launchROM(
+                url: pendingLaunch.url,
+                loadProtectedCloseSave: pendingLaunch.shouldResumeProtectedSave
+            )
+        } catch {
+            session.presentWarning(title: "Unable to Launch ROM", message: error.localizedDescription)
+        }
+    }
+
+    private func configureCloseGameInterceptors() {
+        closeGameCoordinator.onConfirmedExit = { intent in
+            switch intent {
+            case .returnHome:
+                break
+            case .closeWindow:
+                mainWindowController.closeWindowAfterConfirmedClose()
+            case .quitApp:
+                Task { @MainActor in
+                    try? await session.dispose()
+                    appDelegate.continueTerminationAfterConfirmedClose()
+                }
+            }
+        }
+        mainWindowController.shouldInterceptWindowClose = {
+            closeGameCoordinator.shouldInterceptExitRequests
+        }
+        mainWindowController.requestCloseGameForWindowClose = {
+            closeGameCoordinator.requestCloseGame(.closeWindow)
+        }
+        mainWindowController.onTrackedWindowWillClose = {
+            Task { @MainActor in
+                try? await session.dispose()
+            }
+        }
+        appDelegate.shouldInterceptTermination = {
+            closeGameCoordinator.shouldInterceptExitRequests
+        }
+        appDelegate.requestCloseGameForQuit = {
+            closeGameCoordinator.requestCloseGame(.quitApp)
+        }
+        appDelegate.hasTrackedMainWindow = {
+            mainWindowController.hasTrackedWindow
+        }
+        appDelegate.reopenTrackedMainWindow = {
+            mainWindowController.reopenTrackedWindowIfNeeded()
         }
     }
 
@@ -169,6 +251,12 @@ struct Cinder64App: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    var shouldInterceptTermination: (() -> Bool)?
+    var requestCloseGameForQuit: (() -> Void)?
+    var hasTrackedMainWindow: (() -> Bool)?
+    var reopenTrackedMainWindow: (() -> Bool)?
+    private var allowsTerminationAfterConfirmedClose = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -200,5 +288,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         sender.reply(toOpenOrPrint: .success)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        let action = AppReopenPresentation.action(
+            hasVisibleWindows: flag,
+            hasTrackedMainWindow: hasTrackedMainWindow?() == true
+        )
+
+        switch action {
+        case .keepCurrentWindowState:
+            return true
+        case .showTrackedWindow:
+            _ = reopenTrackedMainWindow?()
+            return false
+        case .allowSystemWindowReopen:
+            return true
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if allowsTerminationAfterConfirmedClose {
+            allowsTerminationAfterConfirmedClose = false
+            return .terminateNow
+        }
+
+        guard shouldInterceptTermination?() == true else {
+            return .terminateNow
+        }
+
+        requestCloseGameForQuit?()
+        return .terminateCancel
+    }
+
+    @MainActor
+    func continueTerminationAfterConfirmedClose() {
+        allowsTerminationAfterConfirmedClose = true
+        NSApp.terminate(nil)
     }
 }

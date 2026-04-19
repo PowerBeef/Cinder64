@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-final class Gopher64Bridge {
+final class Gopher64Bridge: @unchecked Sendable {
     enum RuntimeState: Int32 {
         case inactive = 0
         case paused = 1

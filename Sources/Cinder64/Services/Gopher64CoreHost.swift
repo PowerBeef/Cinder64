@@ -21,7 +21,7 @@ final class Gopher64CoreHost: CoreHosting {
             throw Gopher64CoreHostError.renderSurfaceUnavailable
         }
 
-        let runtime = try executor.openROM(at: url, configuration: configuration)
+        let runtime = try await executor.openROM(at: url, configuration: configuration)
         currentSnapshot = SessionSnapshot(
             emulationState: .paused,
             activeROM: configuration.romIdentity,
@@ -82,9 +82,17 @@ final class Gopher64CoreHost: CoreHosting {
         currentSnapshot.activeSaveSlot = slot
     }
 
+    func saveProtectedCloseState(slot: Int) async throws {
+        try executor.saveState(slot: slot)
+    }
+
     func loadState(slot: Int) async throws {
         try executor.loadState(slot: slot)
         currentSnapshot.activeSaveSlot = slot
+    }
+
+    func loadProtectedCloseState(slot: Int) async throws {
+        try executor.loadState(slot: slot)
     }
 
     func updateSettings(_ settings: CoreUserSettings) async throws {
@@ -116,7 +124,12 @@ final class Gopher64CoreHost: CoreHosting {
     }
 
     func stop() async throws {
-        try executor.stop()
+        try await executor.stop()
+        currentSnapshot = .idle
+    }
+
+    func dispose() async throws {
+        try await executor.dispose()
         currentSnapshot = .idle
     }
 }
@@ -134,20 +147,14 @@ private final class Gopher64CoreExecutor {
         self.runtimeLocator = runtimeLocator
     }
 
-    func openROM(at url: URL, configuration: CoreHostConfiguration) throws -> (rendererName: String, frameRate: Double) {
-        try stopIfNeeded()
+    func openROM(at url: URL, configuration: CoreHostConfiguration) async throws -> (rendererName: String, frameRate: Double) {
+        try await stopRuntimeIfNeeded()
 
         guard let renderSurface = configuration.renderSurface, renderSurface.isValid else {
             throw Gopher64CoreHostError.renderSurfaceUnavailable
         }
 
-        let runtimePaths = if let runtimePaths = configuration.runtimePaths {
-            runtimePaths
-        } else {
-            try runtimeLocator.locate()
-        }
-        let bridge = try Gopher64Bridge(runtimePaths: runtimePaths)
-        let session = try bridge.createSession()
+        let (bridge, session, createdNewSession) = try loadOrCreateBridgeSession(configuration: configuration)
 
         do {
             logSurfaceRequest("attach", descriptor: renderSurface)
@@ -155,11 +162,19 @@ private final class Gopher64CoreExecutor {
             logSurfaceEventIfAvailable(from: bridge, session: session)
             let runtime = try bridge.openROM(at: url, configuration: configuration, session: session)
             logSurfaceEventIfAvailable(from: bridge, session: session)
-            self.bridge = bridge
-            self.session = session
             return runtime
         } catch {
-            bridge.destroy(session)
+            if createdNewSession {
+                bridge.destroy(session)
+                self.bridge = nil
+                self.session = nil
+            } else {
+                logStore.record(
+                    "warning",
+                    "Reusing the dormant gopher64 bridge session failed: \(error.localizedDescription). Recreating the bridge on the next launch."
+                )
+                try? await dispose()
+            }
             throw error
         }
     }
@@ -180,9 +195,14 @@ private final class Gopher64CoreExecutor {
 
         let message = bridge.lastError(session: session) ?? "The embedded gopher64 runtime exited unexpectedly."
         logStore.record("warning", "Embedded runtime became inactive: \(message)")
-        bridge.destroy(session)
-        self.bridge = nil
-        self.session = nil
+        do {
+            try bridge.stop(session: session)
+        } catch {
+            logStore.record(
+                "warning",
+                "The gopher64 bridge reported an error while finalizing an inactive runtime: \(error.localizedDescription)"
+            )
+        }
         return .runtimeTerminated(message)
     }
 
@@ -226,22 +246,67 @@ private final class Gopher64CoreExecutor {
         try bridge.setKeyboardKey(scancode: scancode, pressed: pressed, session: session)
     }
 
-    func stop() throws {
-        try stopIfNeeded()
+    func stop() async throws {
+        try await stopRuntimeIfNeeded()
     }
 
-    private func stopIfNeeded() throws {
+    func dispose() async throws {
         guard let bridge, let session else { return }
+        self.bridge = nil
+        self.session = nil
 
         do {
-            try bridge.stop(session: session)
+            try await performBridgeStop(bridge: bridge, session: session)
         } catch {
-            logStore.record("warning", "The gopher64 bridge reported an error while stopping: \(error.localizedDescription)")
+            logStore.record(
+                "warning",
+                "The gopher64 bridge reported an error while stopping before disposal: \(error.localizedDescription)"
+            )
+            bridge.destroy(session)
+            throw error
         }
 
         bridge.destroy(session)
-        self.bridge = nil
-        self.session = nil
+    }
+
+    private func loadOrCreateBridgeSession(
+        configuration: CoreHostConfiguration
+    ) throws -> (bridge: Gopher64Bridge, session: Gopher64Bridge.Session, createdNewSession: Bool) {
+        if let bridge, let session {
+            return (bridge, session, false)
+        }
+
+        let runtimePaths = if let runtimePaths = configuration.runtimePaths {
+            runtimePaths
+        } else {
+            try runtimeLocator.locate()
+        }
+        let bridge = try Gopher64Bridge(runtimePaths: runtimePaths)
+        let session = try bridge.createSession()
+        self.bridge = bridge
+        self.session = session
+        return (bridge, session, true)
+    }
+
+    private func stopRuntimeIfNeeded() async throws {
+        guard let bridge, let session else { return }
+        try await performBridgeStop(bridge: bridge, session: session)
+    }
+
+    private func performBridgeStop(
+        bridge: Gopher64Bridge,
+        session: Gopher64Bridge.Session
+    ) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    try bridge.stop(session: session)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
     }
 
     private func logSurfaceRequest(_ kind: String, descriptor: RenderSurfaceDescriptor) {

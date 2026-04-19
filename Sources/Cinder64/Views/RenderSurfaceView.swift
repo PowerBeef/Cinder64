@@ -29,7 +29,7 @@ struct RenderSurfaceView: View {
             }
         }
         .frame(minHeight: 320)
-        .background(Color.black, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .background(ShellPalette.offBlack, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .shadow(color: ShellPalette.stageShadow, radius: 18, y: 8)
     }
 }
@@ -38,7 +38,7 @@ private struct SurfaceOverlayCard: View {
     let content: SurfaceOverlayContent
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
             if content.tone == .info {
                 ProgressView()
                     .controlSize(.regular)
@@ -59,28 +59,23 @@ private struct SurfaceOverlayCard: View {
                 .frame(maxWidth: 360)
         }
         .padding(.horizontal, 22)
-        .padding(.vertical, 18)
+        .padding(.vertical, 17)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(toneColor.opacity(0.24))
+                .strokeBorder(Color.white.opacity(0.10))
         }
-        .overlay(alignment: .top) {
-            Capsule()
-                .fill(toneColor.opacity(0.9))
-                .frame(width: 44, height: 4)
-                .padding(.top, 12)
-        }
+        .shadow(color: Color.black.opacity(0.16), radius: 14, y: 6)
     }
 
     private var toneColor: Color {
         switch content.tone {
         case .info:
-            ShellPalette.accent
+            ShellPalette.accent.opacity(0.88)
         case .warning:
-            .orange
+            .orange.opacity(0.82)
         case .critical:
-            .red
+            .red.opacity(0.82)
         }
     }
 }

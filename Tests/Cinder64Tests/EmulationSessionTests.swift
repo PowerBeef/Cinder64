@@ -126,6 +126,62 @@ struct EmulationSessionTests {
         #expect(try recentGamesStore.loadRecords().map(\.identity.displayName) == ["Pilotwings 64"])
     }
 
+    @Test func renderSurfaceChangesDuringBootAreReplayedAfterTheSessionStartsRunning() async throws {
+        let harness = try TemporaryDirectoryHarness()
+        let persistence = PersistenceStore(
+            recentGamesStore: RecentGamesStore(storageURL: harness.directory.appending(path: "recent.json")),
+            saveStateStore: SaveStateMetadataStore(storageURL: harness.directory.appending(path: "savestates.json"))
+        )
+        let core = FakeCoreHost()
+        core.resumeBehavior = .waitForRelease
+        let session = EmulationSession(coreHost: core, persistenceStore: persistence)
+        let romURL = harness.directory.appending(path: "F-Zero X.z64")
+        try Data("rom-data".utf8).write(to: romURL)
+
+        let initialSurface = RenderSurfaceDescriptor(
+            windowHandle: 0xABCDABCD,
+            viewHandle: 0xFACADE,
+            logicalWidth: 624,
+            logicalHeight: 431,
+            pixelWidth: 1248,
+            pixelHeight: 862,
+            backingScaleFactor: 2,
+            revision: 1
+        )
+        let settledSurface = RenderSurfaceDescriptor(
+            windowHandle: 0xABCDABCD,
+            viewHandle: 0xFACADE,
+            logicalWidth: 900,
+            logicalHeight: 580,
+            pixelWidth: 1800,
+            pixelHeight: 1160,
+            backingScaleFactor: 2,
+            revision: 2
+        )
+
+        session.updateRenderSurface(initialSurface)
+
+        let launchTask = Task {
+            try await session.openROM(url: romURL)
+        }
+
+        while core.resumeRequestCount == 0 {
+            await Task.yield()
+        }
+
+        #expect(session.snapshot.emulationState == .booting)
+        #expect(core.openConfigurations.last?.renderSurface == initialSurface)
+
+        session.updateRenderSurface(settledSurface)
+        core.releaseResume()
+
+        try await launchTask.value
+        await Task.yield()
+
+        #expect(session.snapshot.emulationState == .running)
+        #expect(core.surfaceUpdates == [settledSurface])
+    }
+
     @Test func savingStateUpdatesMetadataForTheSelectedSlot() async throws {
         let harness = try TemporaryDirectoryHarness()
         let persistence = PersistenceStore(
@@ -153,6 +209,36 @@ struct EmulationSessionTests {
 
         #expect(core.events.suffix(2) == [.setSaveSlot(3), .saveState])
         #expect(metadata["rom-wave-race-64"]?[3]?.slot == 3)
+    }
+
+    @Test func savingProtectedCloseStateUsesTheReservedSlotWithoutChangingTheManualSlot() async throws {
+        let harness = try TemporaryDirectoryHarness()
+        let persistence = PersistenceStore(
+            recentGamesStore: RecentGamesStore(storageURL: harness.directory.appending(path: "recent.json")),
+            saveStateStore: SaveStateMetadataStore(storageURL: harness.directory.appending(path: "savestates.json"))
+        )
+        let core = FakeCoreHost()
+        let session = EmulationSession(coreHost: core, persistenceStore: persistence)
+        let romURL = harness.directory.appending(path: "1080 Snowboarding.z64")
+        try Data("rom-data".utf8).write(to: romURL)
+        session.updateRenderSurface(
+            RenderSurfaceDescriptor(
+                windowHandle: 0xABCDABCD,
+                viewHandle: 0xFACADE,
+                width: 1280,
+                height: 720,
+                backingScaleFactor: 2
+            )
+        )
+
+        try await session.openROM(url: romURL)
+        try await session.saveProtectedCloseState()
+
+        let metadata = try persistence.saveStateStore.loadMetadata()
+
+        #expect(core.events.suffix(2) == [.setSaveSlot(SaveStateMetadataStore.protectedCloseSlot), .saveState])
+        #expect(metadata["rom-1080-snowboarding"]?[SaveStateMetadataStore.protectedCloseSlot]?.kind == .protectedClose)
+        #expect(session.snapshot.activeSaveSlot == 0)
     }
 
     @Test func keyboardInputIsForwardedToTheCoreHostOnceAROMIsRunning() async throws {
@@ -320,6 +406,49 @@ struct EmulationSessionTests {
         #expect(try String(contentsOf: logURL, encoding: .utf8).contains("keyboard input ignored: emulationState=failed"))
     }
 
+    @Test func stoppingAnActiveSessionReturnsToTheLauncherShellWithoutDisposingTheCoreHost() async throws {
+        let harness = try TemporaryDirectoryHarness()
+        let persistence = PersistenceStore(
+            recentGamesStore: RecentGamesStore(storageURL: harness.directory.appending(path: "recent.json")),
+            saveStateStore: SaveStateMetadataStore(storageURL: harness.directory.appending(path: "savestates.json"))
+        )
+        let core = FakeCoreHost()
+        let session = EmulationSession(coreHost: core, persistenceStore: persistence)
+        let romURL = harness.directory.appending(path: "Mario Kart 64.z64")
+        try Data("rom-data".utf8).write(to: romURL)
+        session.updateRenderSurface(
+            RenderSurfaceDescriptor(
+                windowHandle: 0xABCDABCD,
+                viewHandle: 0xFACADE,
+                width: 1280,
+                height: 720,
+                backingScaleFactor: 2
+            )
+        )
+
+        try await session.openROM(url: romURL)
+        try await session.stop()
+
+        #expect(core.events.suffix(3) == [.openROM(romURL), .resume, .stop])
+        #expect(core.events.contains(.dispose) == false)
+        #expect(session.snapshot == .idle)
+        #expect(ShellPresentation.mode(for: session.snapshot) == .homeDashboard)
+    }
+
+    @Test func disposingTheSessionTearsDownTheDormantCoreHost() async throws {
+        let harness = try TemporaryDirectoryHarness()
+        let persistence = PersistenceStore(
+            recentGamesStore: RecentGamesStore(storageURL: harness.directory.appending(path: "recent.json")),
+            saveStateStore: SaveStateMetadataStore(storageURL: harness.directory.appending(path: "savestates.json"))
+        )
+        let core = FakeCoreHost()
+        let session = EmulationSession(coreHost: core, persistenceStore: persistence)
+
+        try await session.dispose()
+
+        #expect(core.events == [.dispose])
+        #expect(session.snapshot == .idle)
+    }
 }
 
 @MainActor
@@ -335,10 +464,13 @@ private final class FakeCoreHost: CoreHosting {
         case setSaveSlot(Int)
         case saveState
         case setKeyboardKey(Int32, Bool)
+        case stop
+        case dispose
     }
 
     var events: [Event] = []
     var openConfigurations: [CoreHostConfiguration] = []
+    var surfaceUpdates: [RenderSurfaceDescriptor] = []
     var resumeBehavior: ResumeBehavior = .immediate
     var nextPumpEvent: CoreRuntimeEvent?
     var updateRenderSurfaceError: Error?
@@ -367,6 +499,7 @@ private final class FakeCoreHost: CoreHosting {
         if let updateRenderSurfaceError {
             throw updateRenderSurfaceError
         }
+        surfaceUpdates.append(descriptor)
     }
 
     func pumpEvents() -> CoreRuntimeEvent? {
@@ -405,7 +538,14 @@ private final class FakeCoreHost: CoreHosting {
         events.append(.saveState)
     }
 
+    func saveProtectedCloseState(slot: Int) async throws {
+        events.append(.setSaveSlot(slot))
+        events.append(.saveState)
+    }
+
     func loadState(slot: Int) async throws {}
+
+    func loadProtectedCloseState(slot: Int) async throws {}
 
     func updateSettings(_ settings: CoreUserSettings) async throws {}
 
@@ -415,7 +555,13 @@ private final class FakeCoreHost: CoreHosting {
         events.append(.setKeyboardKey(scancode, pressed))
     }
 
-    func stop() async throws {}
+    func stop() async throws {
+        events.append(.stop)
+    }
+
+    func dispose() async throws {
+        events.append(.dispose)
+    }
 
     func releaseResume() {
         pendingResumeContinuation?.resume()

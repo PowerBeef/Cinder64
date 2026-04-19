@@ -3,8 +3,19 @@ import Testing
 @testable import Cinder64
 
 struct Cinder64PresentationTests {
+    @Test func mainWindowLaunchUsesAFreshLauncherRestorationPolicy() {
+        #expect(MainWindowLaunchPresentation.restoresPreviousWindowState == false)
+    }
+
     @Test func stoppedSessionsUseTheHomeDashboardShell() {
         #expect(ShellPresentation.mode(for: .idle) == .homeDashboard)
+    }
+
+    @Test func homeDashboardUsesVisibleWindowChrome() {
+        let configuration = MainWindowChromePresentation.configuration(for: .homeDashboard)
+
+        #expect(configuration.showsVisibleTitle)
+        #expect(configuration.usesUnifiedCompactToolbar == false)
     }
 
     @Test func bootingSessionsUseTheGameplayShell() {
@@ -20,6 +31,40 @@ struct Cinder64PresentationTests {
         )
 
         #expect(ShellPresentation.mode(for: snapshot) == .gameplay)
+    }
+
+    @Test func gameplayUsesCompactPlayerChrome() {
+        let configuration = MainWindowChromePresentation.configuration(for: .gameplay)
+
+        #expect(configuration.showsVisibleTitle == false)
+        #expect(configuration.usesUnifiedCompactToolbar)
+    }
+
+    @Test func appReopenKeepsCurrentWindowStateWhenAWindowIsAlreadyVisible() {
+        #expect(
+            AppReopenPresentation.action(
+                hasVisibleWindows: true,
+                hasTrackedMainWindow: true
+            ) == .keepCurrentWindowState
+        )
+    }
+
+    @Test func appReopenShowsTheTrackedMainWindowWhenNoneAreVisible() {
+        #expect(
+            AppReopenPresentation.action(
+                hasVisibleWindows: false,
+                hasTrackedMainWindow: true
+            ) == .showTrackedWindow
+        )
+    }
+
+    @Test func appReopenFallsBackToSystemWindowReopenWhenNoMainWindowIsTracked() {
+        #expect(
+            AppReopenPresentation.action(
+                hasVisibleWindows: false,
+                hasTrackedMainWindow: false
+            ) == .allowSystemWindowReopen
+        )
     }
 
     @Test func stoppedSessionsDoNotShowASurfaceOverlay() {
@@ -43,6 +88,50 @@ struct Cinder64PresentationTests {
         #expect(availability.canPause == false)
         #expect(availability.canResume)
         #expect(availability.canReset)
+        #expect(availability.canUseStateMenu)
+        #expect(availability.canToggleAudio)
+    }
+
+    @Test func bootingSessionsDisableRuntimeToolsUntilReady() {
+        let snapshot = SessionSnapshot(
+            emulationState: .booting,
+            activeROM: makeIdentity(name: "Star Fox 64"),
+            rendererName: "gopher64",
+            fps: 0,
+            videoMode: .none,
+            audioMuted: false,
+            activeSaveSlot: 0,
+            warningBanner: nil
+        )
+
+        let availability = SessionToolbarPresentation.actionAvailability(for: snapshot)
+
+        #expect(availability.canPause == false)
+        #expect(availability.canResume == false)
+        #expect(availability.canReset == false)
+        #expect(availability.canUseStateMenu == false)
+        #expect(availability.canToggleAudio == false)
+    }
+
+    @Test func failedSessionsDisableRuntimeToolsButKeepPlayerChrome() {
+        let snapshot = SessionSnapshot(
+            emulationState: .failed,
+            activeROM: makeIdentity(name: "Star Fox 64"),
+            rendererName: "gopher64",
+            fps: 0,
+            videoMode: .windowed,
+            audioMuted: false,
+            activeSaveSlot: 0,
+            warningBanner: WarningBanner(title: "Stopped", message: "The runtime exited.")
+        )
+
+        let availability = SessionToolbarPresentation.actionAvailability(for: snapshot)
+
+        #expect(availability.canPause == false)
+        #expect(availability.canResume == false)
+        #expect(availability.canReset == false)
+        #expect(availability.canUseStateMenu == false)
+        #expect(availability.canToggleAudio == false)
     }
 
     @Test func runningSessionsUseSlimChromeCopy() {
@@ -60,7 +149,45 @@ struct Cinder64PresentationTests {
         #expect(SessionToolbarPresentation.subtitle(for: snapshot) == nil)
     }
 
-    @Test func statusStripIncludesDisplayModeAndAudioState() {
+    @Test func stateMenuUsesHumanReadableSlotLabels() {
+        #expect(SessionToolbarPresentation.stateMenuTitle(forSlot: 0) == "State • Slot 1")
+        #expect(SessionToolbarPresentation.stateMenuTitle(forSlot: 3) == "State • Slot 4")
+    }
+
+    @Test func gameplayToolbarUsesHomeActionCopy() {
+        #expect(SessionToolbarPresentation.homeActionTitle == "Home")
+        #expect(SessionToolbarPresentation.homeActionSymbolName == "house")
+    }
+
+    @Test func sessionConsoleAudioToolReflectsMuteState() {
+        let liveAudioSnapshot = SessionSnapshot(
+            emulationState: .running,
+            activeROM: makeIdentity(name: "Wave Race 64"),
+            rendererName: "Fake Renderer",
+            fps: 57.9,
+            videoMode: .windowed,
+            audioMuted: false,
+            activeSaveSlot: 1,
+            warningBanner: nil
+        )
+        let mutedAudioSnapshot = SessionSnapshot(
+            emulationState: .running,
+            activeROM: makeIdentity(name: "Wave Race 64"),
+            rendererName: "Fake Renderer",
+            fps: 57.9,
+            videoMode: .windowed,
+            audioMuted: true,
+            activeSaveSlot: 1,
+            warningBanner: nil
+        )
+
+        #expect(SessionToolbarPresentation.audioToolTitle(for: liveAudioSnapshot) == "Mute")
+        #expect(SessionToolbarPresentation.audioToolSymbolName(for: liveAudioSnapshot) == "speaker.wave.2")
+        #expect(SessionToolbarPresentation.audioToolTitle(for: mutedAudioSnapshot) == "Unmute")
+        #expect(SessionToolbarPresentation.audioToolSymbolName(for: mutedAudioSnapshot) == "speaker.slash")
+    }
+
+    @Test func statusStripOnlyIncludesPassiveVideoState() {
         let snapshot = SessionSnapshot(
             emulationState: .running,
             activeROM: makeIdentity(name: "Wave Race 64"),
@@ -74,9 +201,8 @@ struct Cinder64PresentationTests {
 
         let items = SessionStatusStripPresentation.items(for: snapshot, displayMode: .windowed3x)
 
+        #expect(items.count == 1)
         #expect(items.contains(SessionStatusItem(label: "Video", value: "Fake Renderer • 58 FPS", symbolName: "display")))
-        #expect(items.contains(SessionStatusItem(label: "Window", value: "3x Windowed", symbolName: "rectangle.inset.filled")))
-        #expect(items.contains(SessionStatusItem(label: "Audio", value: "Muted", symbolName: "speaker.slash")))
     }
 
     @Test func homeDashboardSummarizesRecentGames() {
@@ -88,13 +214,13 @@ struct Cinder64PresentationTests {
         )
 
         #expect(content.title == "Cinder64")
-        #expect(content.recentSummary == "2 recent launches ready.")
+        #expect(content.recentSummary == "2 launches ready.")
     }
 
     @Test func homeDashboardHandlesAnEmptyRecentList() {
         let content = HomeDashboardPresentation.content(for: [])
 
-        #expect(content.recentSummary == "No recent launches yet.")
+        #expect(content.recentSummary == "No recent launches.")
         #expect(content.primaryActionTitle == "Open ROM…")
     }
 

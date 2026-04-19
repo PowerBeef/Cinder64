@@ -45,20 +45,13 @@ struct RecentGamesListView: View {
 
 private struct SidebarBrandHeader: View {
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(ShellPalette.accent)
-                    .frame(width: 8, height: 8)
+        HStack(spacing: 8) {
+            Circle()
+                .fill(ShellPalette.accent)
+                .frame(width: 8, height: 8)
 
-                Text("Cinder64")
-                    .font(.system(size: 18, weight: .semibold, design: .rounded))
-            }
-
-            Text("Native macOS front end for launching, relaunching, and handing the window over to gameplay.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            Text("Cinder64")
+                .font(.system(size: 18, weight: .semibold, design: .rounded))
         }
     }
 }
@@ -110,7 +103,7 @@ private struct SidebarEmptyState: View {
             Label("No Recent Launches", systemImage: "clock.arrow.circlepath")
                 .font(.subheadline.weight(.semibold))
 
-            Text("Open a ROM once and it stays close for quick relaunch from the sidebar.")
+            Text("Open a ROM once and it stays here for quick relaunch.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 

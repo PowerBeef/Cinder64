@@ -6,7 +6,7 @@ This is the only maintained agent handbook in this repo. Do not recreate `CLAUDE
 
 ## What this is
 
-Cinder64 is a native macOS SwiftUI front-end for the [gopher64](https://github.com/gopher64/gopher64) Nintendo 64 emulator. The Swift app embeds gopher64 through a vendored Rust `cdylib` shim in `ThirdParty/gopher64/cinder64_bridge`, then hand-assembles `dist/Cinder64.app` with shell scripts.
+Cinder64 is a native macOS SwiftUI front-end for the [gopher64](https://github.com/gopher64/gopher64) Nintendo 64 emulator. The Swift app embeds gopher64 through a vendored Rust `cdylib` shim in `ThirdParty/gopher64/cinder64_bridge`, then hand-assembles per-run app bundles under `dist/runs/<timestamp>-<pid>/Cinder64.app` with shell scripts. `dist/Cinder64.app` is a symlink to the newest successful bundle for convenience.
 
 Important repo shape:
 
@@ -24,8 +24,10 @@ There is no Xcode project workflow here. Use SwiftPM, Cargo, and the shell scrip
 
 - Main dev loop: `./script/build_and_run.sh`
   What it does:
-  Builds the Rust bridge in release, runs `swift build`, assembles `dist/Cinder64.app`, copies the bridge and optional Homebrew support dylibs into `Contents/Frameworks`, rewrites install names, ad-hoc signs the bundle, and launches it.
+  Builds the Rust bridge in release, runs `swift build`, assembles a unique `dist/runs/.../Cinder64.app`, copies the bridge and optional Homebrew support dylibs into `Contents/Frameworks`, rewrites install names, ad-hoc signs the bundle, updates the `dist/Cinder64.app` symlink, and launches the unique bundle.
 - Bundle-only verification: `./script/build_and_run.sh --prepare`
+- Machine-readable bundle path: `./script/build_and_run.sh --prepare --print-bundle-path`
+  Prints only the prepared bundle path on stdout; build/sign/verify diagnostics stay on stderr.
 - Process/signature verification: `./script/build_and_run.sh --verify`
 - Debug launch: `./script/build_and_run.sh --debug`
 - Logs/telemetry: `./script/build_and_run.sh --logs` and `./script/build_and_run.sh --telemetry`
@@ -34,11 +36,11 @@ There is no Xcode project workflow here. Use SwiftPM, Cargo, and the shell scrip
 - Swift tests: `swift test`
   Suites use Swift Testing `@Test`, not XCTest. `Gopher64CoreHostIntegrationTests` shells out to `cargo build --release`.
 - LaunchServices smoke: `./script/verify_launch_services_boot.sh [ROM] [WORKDIR]`
-  Cold-launches the bundle into an isolated app-support root, checks `runtime.log`, `recent-games.json`, and asserts exactly one visible `Cinder64` window.
+  Cold-launches a uniquely prepared bundle into an isolated app-support root, checks `runtime.log`, `recent-games.json`, and asserts exactly one visible layer-0 window for the launched PID.
 - Full in-game boot smoke: `./script/verify_full_boot.sh [ROM] [WORKDIR]`
-  Cold-launches the app, injects the `smoke` scripted Start/A key profile, asserts the scripted steps in `runtime.log`, verifies `frame_count` progression, checks recent-games persistence, and fails on crash reports or rejected keyboard injections.
+  Cold-launches a uniquely prepared bundle, injects the `smoke` scripted Start/A key profile, asserts the scripted steps in `runtime.log`, verifies `frame_count` progression, checks recent-games persistence, and fails on crash reports or rejected keyboard injections for the launched PID only.
 - Foreground visual boot helper: `./script/verify_visual_boot.sh [ROM] [WORKDIR]`
-  Cold-launches the app with the `visual` scripted Start/A key profile, waits through the expected title-to-gameplay timeline, and leaves the app open for foreground inspection.
+  Cold-launches a uniquely prepared bundle with the `visual` scripted Start/A key profile, waits through the expected title-to-gameplay timeline, and leaves only that launched PID open for foreground inspection.
 
 ## Load-bearing overrides
 

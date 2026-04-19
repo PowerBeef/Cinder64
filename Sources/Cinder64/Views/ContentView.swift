@@ -2,7 +2,10 @@ import SwiftUI
 
 struct ContentView: View {
     @Bindable var session: EmulationSession
+    @Bindable var closeGameCoordinator: CloseGameCoordinator
     let openROMRequested: () -> Void
+    let returnHomeRequested: () -> Void
+    let completePendingProtectedLaunchRequested: (Bool) -> Void
     let launchROMRequested: (URL) -> Void
     let applyDisplayMode: (MainWindowDisplayMode) -> Void
 
@@ -14,59 +17,159 @@ struct ContentView: View {
         SessionToolbarPresentation.actionAvailability(for: session.snapshot)
     }
 
+    private var shellMode: ShellPresentationMode {
+        ShellPresentation.mode(for: session.snapshot)
+    }
+
     var body: some View {
-        NavigationSplitView {
-            RecentGamesListView(
-                session: session,
-                openROMRequested: openROMRequested,
-                launchROMRequested: launchROMRequested
-            )
-            .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 250)
-        } detail: {
-            Group {
-                switch ShellPresentation.mode(for: session.snapshot) {
-                case .homeDashboard:
-                    HomeDashboardView(
-                        content: HomeDashboardPresentation.content(for: session.recentGames),
-                        recentGames: Array(session.recentGames.prefix(3)),
-                        openROMRequested: openROMRequested,
-                        launchROMRequested: launchROMRequested
-                    )
-                case .gameplay:
-                    ActiveGameplayView(
-                        snapshot: session.snapshot,
-                        displayMode: displayMode,
-                        actionAvailability: actionAvailability,
-                        openROMRequested: openROMRequested,
-                        applyDisplayMode: applyDisplayMode,
-                        pauseRequested: {
-                            Task { try? await session.pause() }
-                        },
-                        resumeRequested: {
-                            Task { try? await session.resume() }
-                        },
-                        resetRequested: {
-                            Task { try? await session.reset() }
-                        },
-                        surfaceChanged: session.updateRenderSurface,
-                        keyboardInputChanged: session.handleKeyboardInput,
-                        pumpRuntimeEvents: session.pumpRuntimeEvents
-                    )
-                }
+        Group {
+            switch shellMode {
+            case .homeDashboard:
+                HomeShellView(
+                    session: session,
+                    resumePrompt: closeGameCoordinator.resumePrompt,
+                    openROMRequested: openROMRequested,
+                    launchROMRequested: launchROMRequested,
+                    continueRequested: {
+                        completePendingProtectedLaunchRequested(true)
+                    },
+                    startFreshRequested: {
+                        completePendingProtectedLaunchRequested(false)
+                    }
+                )
+            case .gameplay:
+                GameplayShellView(
+                    snapshot: session.snapshot,
+                    displayMode: displayMode,
+                    actionAvailability: actionAvailability,
+                    closePrompt: closeGameCoordinator.closePrompt,
+                    returnHomeRequested: returnHomeRequested,
+                    cancelCloseGameRequested: closeGameCoordinator.cancelCloseGame,
+                    closeWithoutSavingRequested: {
+                        Task { await closeGameCoordinator.closeWithoutSaving() }
+                    },
+                    saveAndCloseRequested: {
+                        Task { await closeGameCoordinator.saveAndClose() }
+                    },
+                    applyDisplayMode: applyDisplayMode,
+                    pauseRequested: {
+                        Task { try? await session.pause() }
+                    },
+                    resumeRequested: {
+                        Task { try? await session.resume() }
+                    },
+                    resetRequested: {
+                        Task { try? await session.reset() }
+                    },
+                    saveStateRequested: { slot in
+                        Task { try? await session.saveState(slot: slot) }
+                    },
+                    loadStateRequested: { slot in
+                        Task { try? await session.loadState(slot: slot) }
+                    },
+                    toggleMuteRequested: {
+                        Task {
+                            var settings = session.activeSettings
+                            settings.muteAudio.toggle()
+                            try? await session.updateSettings(settings)
+                        }
+                    },
+                    surfaceChanged: session.updateRenderSurface,
+                    keyboardInputChanged: session.handleKeyboardInput,
+                    pumpRuntimeEvents: session.pumpRuntimeEvents
+                )
             }
-            .padding(18)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .navigationSplitViewStyle(.balanced)
+        .animation(.easeOut(duration: 0.18), value: closeGameCoordinator.closePrompt)
+        .animation(.easeOut(duration: 0.18), value: closeGameCoordinator.resumePrompt)
+    }
+}
+
+private struct PromptBackdrop: View {
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.34)
+                .ignoresSafeArea()
+
+            Rectangle()
+                .fill(.ultraThinMaterial.opacity(0.18))
+                .ignoresSafeArea()
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+private struct PromptOverlayContainer<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        ZStack {
+            PromptBackdrop()
+
+            content
+                .frame(maxWidth: 430)
+                .padding(24)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
 enum ShellPalette {
-    static let accent = Color(red: 0.91, green: 0.42, blue: 0.20)
-    static let accentSoft = accent.opacity(0.16)
+    static let accent = Color(red: 0.83, green: 0.38, blue: 0.20)
+    static let accentSoft = accent.opacity(0.15)
+    static let accentGlow = accent.opacity(0.08)
     static let line = Color.white.opacity(0.08)
     static let strongLine = Color.white.opacity(0.12)
-    static let stageShadow = Color.black.opacity(0.12)
+    static let stageShadow = Color.black.opacity(0.10)
+    static let offBlack = Color(red: 0.04, green: 0.04, blue: 0.05)
+}
+
+private struct HomeShellView: View {
+    @Bindable var session: EmulationSession
+    let resumePrompt: ResumeProtectedSavePromptState?
+    let openROMRequested: () -> Void
+    let launchROMRequested: (URL) -> Void
+    let continueRequested: () -> Void
+    let startFreshRequested: () -> Void
+
+    var body: some View {
+        ZStack {
+            NavigationSplitView {
+                RecentGamesListView(
+                    session: session,
+                    openROMRequested: openROMRequested,
+                    launchROMRequested: launchROMRequested
+                )
+                .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 250)
+            } detail: {
+                HomeDashboardView(
+                    content: HomeDashboardPresentation.content(for: session.recentGames),
+                    recentGames: Array(session.recentGames.prefix(3)),
+                    openROMRequested: openROMRequested,
+                    launchROMRequested: launchROMRequested
+                )
+                .padding(.horizontal, 10)
+                .padding(.vertical, 12)
+            }
+            .disabled(resumePrompt != nil)
+
+            if let resumePrompt {
+                PromptOverlayContainer {
+                    ResumeProtectedSavePromptCard(
+                        prompt: resumePrompt,
+                        continueRequested: continueRequested,
+                        startFreshRequested: startFreshRequested
+                    )
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
 }
 
 private struct HomeDashboardView: View {
@@ -79,52 +182,46 @@ private struct HomeDashboardView: View {
         ScrollView(.vertical, showsIndicators: false) {
             ZStack(alignment: .topTrailing) {
                 HomeCanvasAccent()
+                    .allowsHitTesting(false)
 
-                VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 34) {
                     HomeBrandHeader(
                         content: content,
                         openROMRequested: openROMRequested
                     )
 
-                    HomePanelDivider()
-
                     ViewThatFits(in: .horizontal) {
-                        HStack(alignment: .top, spacing: 32) {
-                            HomeRecentLaunchColumn(
+                        HStack(alignment: .top, spacing: 42) {
+                            HomeRecentLaunchBoard(
                                 content: content,
                                 recentGames: recentGames,
                                 openROMRequested: openROMRequested,
                                 launchROMRequested: launchROMRequested
                             )
+                            .frame(maxWidth: .infinity, alignment: .leading)
 
-                            HomeOperationsColumn()
-                                .frame(width: 260, alignment: .topLeading)
+                            HomeOperationalRail()
+                                .frame(width: 250, alignment: .topLeading)
                         }
 
-                        VStack(alignment: .leading, spacing: 24) {
-                            HomeRecentLaunchColumn(
+                        VStack(alignment: .leading, spacing: 28) {
+                            HomeRecentLaunchBoard(
                                 content: content,
                                 recentGames: recentGames,
                                 openROMRequested: openROMRequested,
                                 launchROMRequested: launchROMRequested
                             )
 
-                            HomeOperationsColumn()
+                            HomeOperationalRail()
                         }
                     }
-
-                    HomePanelDivider()
-
-                    HomeUtilityStrip()
                 }
-                .padding(28)
+                .frame(maxWidth: 1080, alignment: .leading)
+                .padding(.horizontal, 22)
+                .padding(.top, 20)
+                .padding(.bottom, 28)
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .strokeBorder(ShellPalette.line)
-            }
         }
     }
 }
@@ -133,45 +230,43 @@ private struct HomeBrandHeader: View {
     let content: HomeDashboardContent
     let openROMRequested: () -> Void
 
-    private let readinessItems: [(String, String)] = [
+    private let modeItems: [(String, String)] = [
         ("Windowed", "1x, 2x, 3x, 4x"),
-        ("Display", "Fullscreen available"),
-        ("Input", "Keyboard ready on launch"),
+        ("Fullscreen", "Available any time"),
     ]
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 32) {
-                heroCopy
-                Spacer(minLength: 0)
-                readinessAside
+            HStack(alignment: .top, spacing: 54) {
+                heroColumn
+                modeRail
             }
 
-            VStack(alignment: .leading, spacing: 20) {
-                heroCopy
-                readinessAside
+            VStack(alignment: .leading, spacing: 24) {
+                heroColumn
+                modeRail
             }
         }
     }
 
-    private var heroCopy: some View {
-        VStack(alignment: .leading, spacing: 12) {
+    private var heroColumn: some View {
+        VStack(alignment: .leading, spacing: 14) {
             Text(content.eyebrow.uppercased())
                 .font(.caption.weight(.semibold))
-                .tracking(1.1)
+                .tracking(1.2)
                 .foregroundStyle(.secondary)
 
             Text(content.title)
-                .font(.system(size: 42, weight: .bold, design: .rounded))
+                .font(.system(size: 54, weight: .bold, design: .rounded))
+                .tracking(-1.3)
                 .foregroundStyle(.primary)
 
             Text(content.message)
                 .font(.title3)
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 520, alignment: .leading)
+                .frame(maxWidth: 480, alignment: .leading)
 
-            HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: 14) {
                 Button(action: openROMRequested) {
                     Label(content.primaryActionTitle, systemImage: "plus.circle.fill")
                 }
@@ -181,25 +276,24 @@ private struct HomeBrandHeader: View {
                 Text(content.recentSummary)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
-    private var readinessAside: some View {
+    private var modeRail: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Ready to Play")
-                .font(.headline)
+            Text("Launch Surface")
+                .font(.caption.weight(.semibold))
+                .tracking(1.1)
+                .foregroundStyle(.secondary)
 
-            VStack(alignment: .leading, spacing: 12) {
-                ForEach(readinessItems, id: \.0) { item in
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(item.0)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Text(item.1)
-                            .font(.subheadline)
-                    }
+            ForEach(modeItems, id: \.0) { item in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.0)
+                        .font(.headline)
+                    Text(item.1)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -214,51 +308,61 @@ private struct HomeBrandHeader: View {
 
 private struct HomeCanvasAccent: View {
     var body: some View {
-        ZStack {
+        ZStack(alignment: .topTrailing) {
             Circle()
-                .fill(ShellPalette.accent.opacity(0.22))
-                .frame(width: 260, height: 260)
-                .offset(x: 170, y: -120)
-                .blur(radius: 16)
+                .fill(ShellPalette.accentGlow)
+                .frame(width: 320, height: 320)
+                .offset(x: 210, y: -110)
+                .blur(radius: 18)
 
-            Circle()
-                .fill(ShellPalette.accent.opacity(0.10))
-                .frame(width: 200, height: 200)
-                .offset(x: 30, y: 40)
-                .blur(radius: 28)
+            RoundedRectangle(cornerRadius: 120, style: .continuous)
+                .fill(ShellPalette.accent.opacity(0.06))
+                .frame(width: 240, height: 240)
+                .rotationEffect(.degrees(18))
+                .offset(x: 40, y: 210)
+                .blur(radius: 10)
         }
-        .clipped()
     }
 }
 
-private struct HomeRecentLaunchColumn: View {
+private struct HomeRecentLaunchBoard: View {
     let content: HomeDashboardContent
     let recentGames: [RecentGameRecord]
     let openROMRequested: () -> Void
     let launchROMRequested: (URL) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Recent Launches")
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Recent Launches")
+                    .font(.system(size: 24, weight: .semibold, design: .rounded))
+                Text("Reopen a familiar session or pick a ROM and let the stage take over.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.bottom, 16)
+
+            HomePanelDivider()
 
             if recentGames.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Your recent library appears here after the first successful launch.")
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("No launches yet. Open a ROM once and it will stay here for the next run.")
                         .foregroundStyle(.secondary)
 
                     Button(action: openROMRequested) {
                         Label("Choose a ROM", systemImage: "folder.badge.plus")
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.borderedProminent)
+                    .tint(ShellPalette.accent)
                 }
+                .padding(.vertical, 22)
             } else {
                 VStack(spacing: 0) {
                     ForEach(Array(recentGames.enumerated()), id: \.element.identity.id) { index, record in
                         Button {
                             launchROMRequested(record.identity.fileURL)
                         } label: {
-                            HomeRecentLaunchRow(record: record)
+                            HomeRecentLaunchRow(record: record, isPrimary: index == 0)
                         }
                         .buttonStyle(.plain)
 
@@ -269,27 +373,33 @@ private struct HomeRecentLaunchColumn: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(24)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 30, style: .continuous)
+                .strokeBorder(ShellPalette.line)
+        }
     }
 }
 
 private struct HomeRecentLaunchRow: View {
     let record: RecentGameRecord
+    let isPrimary: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(ShellPalette.accentSoft)
-                .frame(width: 34, height: 34)
+        HStack(alignment: .top, spacing: 14) {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isPrimary ? ShellPalette.accentSoft.opacity(1.1) : ShellPalette.accentSoft)
+                .frame(width: isPrimary ? 40 : 34, height: isPrimary ? 40 : 34)
                 .overlay {
                     Image(systemName: "gamecontroller.fill")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: isPrimary ? 16 : 14, weight: .semibold))
                         .foregroundStyle(ShellPalette.accent)
                 }
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(record.identity.displayName)
-                    .font(.headline)
+                    .font(isPrimary ? .title3.weight(.semibold) : .headline)
                     .lineLimit(1)
 
                 Text(secondaryLabel)
@@ -303,8 +413,9 @@ private struct HomeRecentLaunchRow: View {
             Image(systemName: "arrow.up.right")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.tertiary)
+                .padding(.top, 4)
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, isPrimary ? 18 : 14)
         .contentShape(Rectangle())
     }
 
@@ -318,99 +429,50 @@ private struct HomeRecentLaunchRow: View {
     }
 }
 
-private struct HomeOperationsColumn: View {
-    private let controlRows: [(String, String)] = [
-        ("Start", "Return"),
-        ("A Button", "Left Shift"),
-        ("Move", "Arrow Keys"),
-    ]
-
-    private let modeRows: [(String, String)] = [
-        ("Windowed", "1x • 2x • 3x • 4x"),
-        ("Fullscreen", "Available from the display menu"),
+private struct HomeOperationalRail: View {
+    private let groups: [(String, [(String, String)])] = [
+        (
+            "Controls",
+            [
+                ("Start", "Return"),
+                ("A Button", "Left Shift"),
+                ("Move", "Arrow Keys"),
+            ]
+        ),
+        (
+            "Display",
+            [
+                ("Default", "Fixed window modes"),
+                ("Fullscreen", "Available from the display menu"),
+            ]
+        ),
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            HomeInfoGroup(
-                title: "Default Controls",
-                rows: controlRows
-            )
+        VStack(alignment: .leading, spacing: 24) {
+            ForEach(groups, id: \.0) { group in
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(group.0.uppercased())
+                        .font(.caption.weight(.semibold))
+                        .tracking(1.1)
+                        .foregroundStyle(.secondary)
 
-            HomeInfoGroup(
-                title: "Display Modes",
-                rows: modeRows
-            )
-        }
-    }
-}
-
-private struct HomeInfoGroup: View {
-    let title: String
-    let rows: [(String, String)]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.headline)
-
-            VStack(spacing: 10) {
-                ForEach(rows, id: \.0) { row in
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(row.0)
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 16)
-                        Text(row.1)
-                            .font(.subheadline.weight(.semibold))
-                            .multilineTextAlignment(.trailing)
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(group.1, id: \.0) { row in
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(row.0)
+                                    .foregroundStyle(.secondary)
+                                Spacer(minLength: 12)
+                                Text(row.1)
+                                    .font(.subheadline.weight(.semibold))
+                                    .multilineTextAlignment(.trailing)
+                            }
+                        }
                     }
                 }
             }
         }
-    }
-}
-
-private struct HomeUtilityStrip: View {
-    private let items: [(String, String)] = [
-        ("Workspace", "Gameplay takes over this canvas once a ROM boots."),
-        ("Sidebar", "Recent launches stay pinned for quick relaunch."),
-        ("Settings", "Display, audio, and speed stay out of the way."),
-    ]
-
-    var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 24) {
-                ForEach(items, id: \.0) { item in
-                    HomeUtilityFact(title: item.0, value: item.1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 14) {
-                ForEach(items, id: \.0) { item in
-                    HomeUtilityFact(title: item.0, value: item.1)
-                }
-            }
-        }
-    }
-}
-
-private struct HomeUtilityFact: View {
-    let title: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title.uppercased())
-                .font(.caption.weight(.semibold))
-                .tracking(0.9)
-                .foregroundStyle(.secondary)
-
-            Text(value)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+        .padding(.top, 14)
     }
 }
 
@@ -422,32 +484,305 @@ private struct HomePanelDivider: View {
     }
 }
 
-private struct ActiveGameplayView: View {
+private struct CloseGamePromptCard: View {
+    let prompt: CloseGamePromptState
+    let cancelRequested: () -> Void
+    let closeWithoutSavingRequested: () -> Void
+    let saveAndCloseRequested: () -> Void
+
+    private var isBusy: Bool {
+        prompt.phase == .saving || prompt.phase == .closing
+    }
+
+    private var message: String {
+        if let errorMessage = prompt.errorMessage, errorMessage.isEmpty == false {
+            return errorMessage
+        }
+
+        if prompt.canSave {
+            return "Save a protected close-game checkpoint before leaving \(prompt.romDisplayName), or leave without saving."
+        }
+
+        return "This session cannot be saved right now, but you can still leave the game or cancel."
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Close Game")
+                    .font(.title2.weight(.semibold))
+
+                Text(message)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if isBusy {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+
+                    Text(prompt.phase == .saving ? "Saving protected close-game slot…" : "Closing game…")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 12) {
+                Button("Cancel", action: cancelRequested)
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(isBusy)
+
+                Spacer(minLength: 0)
+
+                Button("Close Without Saving", action: closeWithoutSavingRequested)
+                    .disabled(isBusy)
+
+                Button("Save & Close", action: saveAndCloseRequested)
+                    .buttonStyle(.borderedProminent)
+                    .tint(ShellPalette.accent)
+                    .disabled(prompt.canSave == false || isBusy)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(ShellPalette.strongLine)
+        }
+        .shadow(color: Color.black.opacity(0.20), radius: 22, y: 10)
+    }
+}
+
+private struct ResumeProtectedSavePromptCard: View {
+    let prompt: ResumeProtectedSavePromptState
+    let continueRequested: () -> Void
+    let startFreshRequested: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Resume Previous Session?")
+                    .font(.title2.weight(.semibold))
+
+                Text("A protected close-game save is available for \(prompt.romDisplayName). Continue from that checkpoint or start a fresh launch.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 12) {
+                Spacer(minLength: 0)
+
+                Button("Start Fresh", action: startFreshRequested)
+
+                Button("Continue", action: continueRequested)
+                    .buttonStyle(.borderedProminent)
+                    .tint(ShellPalette.accent)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(ShellPalette.strongLine)
+        }
+        .shadow(color: Color.black.opacity(0.20), radius: 22, y: 10)
+    }
+}
+
+private struct GameplayShellView: View {
     let snapshot: SessionSnapshot
     let displayMode: MainWindowDisplayMode
     let actionAvailability: SessionToolbarActionAvailability
-    let openROMRequested: () -> Void
+    let closePrompt: CloseGamePromptState?
+    let returnHomeRequested: () -> Void
+    let cancelCloseGameRequested: () -> Void
+    let closeWithoutSavingRequested: () -> Void
+    let saveAndCloseRequested: () -> Void
     let applyDisplayMode: (MainWindowDisplayMode) -> Void
     let pauseRequested: () -> Void
     let resumeRequested: () -> Void
     let resetRequested: () -> Void
+    let saveStateRequested: (Int) -> Void
+    let loadStateRequested: (Int) -> Void
+    let toggleMuteRequested: () -> Void
+    let surfaceChanged: (RenderSurfaceDescriptor?) -> Void
+    let keyboardInputChanged: (EmbeddedKeyboardEvent) -> Void
+    let pumpRuntimeEvents: () -> Void
+
+    @State private var selectedSlot: Int
+
+    init(
+        snapshot: SessionSnapshot,
+        displayMode: MainWindowDisplayMode,
+        actionAvailability: SessionToolbarActionAvailability,
+        closePrompt: CloseGamePromptState?,
+        returnHomeRequested: @escaping () -> Void,
+        cancelCloseGameRequested: @escaping () -> Void,
+        closeWithoutSavingRequested: @escaping () -> Void,
+        saveAndCloseRequested: @escaping () -> Void,
+        applyDisplayMode: @escaping (MainWindowDisplayMode) -> Void,
+        pauseRequested: @escaping () -> Void,
+        resumeRequested: @escaping () -> Void,
+        resetRequested: @escaping () -> Void,
+        saveStateRequested: @escaping (Int) -> Void,
+        loadStateRequested: @escaping (Int) -> Void,
+        toggleMuteRequested: @escaping () -> Void,
+        surfaceChanged: @escaping (RenderSurfaceDescriptor?) -> Void,
+        keyboardInputChanged: @escaping (EmbeddedKeyboardEvent) -> Void,
+        pumpRuntimeEvents: @escaping () -> Void
+    ) {
+        self.snapshot = snapshot
+        self.displayMode = displayMode
+        self.actionAvailability = actionAvailability
+        self.closePrompt = closePrompt
+        self.returnHomeRequested = returnHomeRequested
+        self.cancelCloseGameRequested = cancelCloseGameRequested
+        self.closeWithoutSavingRequested = closeWithoutSavingRequested
+        self.saveAndCloseRequested = saveAndCloseRequested
+        self.applyDisplayMode = applyDisplayMode
+        self.pauseRequested = pauseRequested
+        self.resumeRequested = resumeRequested
+        self.resetRequested = resetRequested
+        self.saveStateRequested = saveStateRequested
+        self.loadStateRequested = loadStateRequested
+        self.toggleMuteRequested = toggleMuteRequested
+        self.surfaceChanged = surfaceChanged
+        self.keyboardInputChanged = keyboardInputChanged
+        self.pumpRuntimeEvents = pumpRuntimeEvents
+        _selectedSlot = State(initialValue: snapshot.activeSaveSlot)
+    }
+
+    private var isClosePromptVisible: Bool {
+        closePrompt != nil
+    }
+
+    var body: some View {
+        ZStack {
+            ActiveGameplayView(
+                snapshot: snapshot,
+                displayMode: displayMode,
+                surfaceChanged: surfaceChanged,
+                keyboardInputChanged: keyboardInputChanged,
+                pumpRuntimeEvents: pumpRuntimeEvents
+            )
+            .allowsHitTesting(isClosePromptVisible == false)
+
+            if let closePrompt {
+                PromptOverlayContainer {
+                    CloseGamePromptCard(
+                        prompt: closePrompt,
+                        cancelRequested: cancelCloseGameRequested,
+                        closeWithoutSavingRequested: closeWithoutSavingRequested,
+                        saveAndCloseRequested: saveAndCloseRequested
+                    )
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
+        .padding(14)
+        .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                Button(action: returnHomeRequested) {
+                    GameplayToolbarItemLabel(
+                        title: SessionToolbarPresentation.homeActionTitle,
+                        systemImage: SessionToolbarPresentation.homeActionSymbolName
+                    )
+                }
+                .disabled(isClosePromptVisible)
+
+                Button(action: transportAction) {
+                    GameplayToolbarItemLabel(
+                        title: SessionToolbarPresentation.transportTitle(for: snapshot),
+                        systemImage: SessionToolbarPresentation.transportSymbolName(for: snapshot)
+                    )
+                }
+                .disabled(isClosePromptVisible || (actionAvailability.canPause == false && actionAvailability.canResume == false))
+
+                Button(action: resetRequested) {
+                    GameplayToolbarItemLabel(title: "Reset", systemImage: "arrow.clockwise")
+                }
+                .disabled(isClosePromptVisible || actionAvailability.canReset == false)
+
+                Menu {
+                    Button("Save to Slot \(selectedSlot + 1)") {
+                        saveStateRequested(selectedSlot)
+                    }
+
+                    Button("Load Slot \(selectedSlot + 1)") {
+                        loadStateRequested(selectedSlot)
+                    }
+
+                    Divider()
+
+                    ForEach(0 ..< 4, id: \.self) { slot in
+                        Button("Use Slot \(slot + 1)") {
+                            selectedSlot = slot
+                        }
+                    }
+                } label: {
+                    GameplayToolbarItemLabel(
+                        title: SessionToolbarPresentation.stateMenuTitle(forSlot: selectedSlot),
+                        systemImage: "square.stack.3d.down.right"
+                    )
+                }
+                .disabled(isClosePromptVisible || actionAvailability.canUseStateMenu == false)
+            }
+
+            ToolbarItem(placement: .principal) {
+                GameplayTitlebarTitle(snapshot: snapshot)
+            }
+
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button(action: toggleMuteRequested) {
+                    GameplayToolbarItemLabel(
+                        title: SessionToolbarPresentation.audioToolTitle(for: snapshot),
+                        systemImage: SessionToolbarPresentation.audioToolSymbolName(for: snapshot)
+                    )
+                }
+                .disabled(isClosePromptVisible || actionAvailability.canToggleAudio == false)
+
+                Menu {
+                    ForEach(MainWindowDisplayMode.allCases, id: \.self) { mode in
+                        Button(mode.title) {
+                            applyDisplayMode(mode)
+                        }
+                        .disabled(displayMode == mode)
+                    }
+                } label: {
+                    GameplayToolbarItemLabel(
+                        title: SessionToolbarPresentation.compactDisplayTitle(for: displayMode),
+                        systemImage: "display"
+                    )
+                }
+                .disabled(isClosePromptVisible)
+            }
+        }
+        .onChange(of: snapshot.activeSaveSlot) { _, newValue in
+            selectedSlot = newValue
+        }
+    }
+
+    private func transportAction() {
+        if snapshot.emulationState == .paused {
+            resumeRequested()
+        } else {
+            pauseRequested()
+        }
+    }
+}
+
+private struct ActiveGameplayView: View {
+    let snapshot: SessionSnapshot
+    let displayMode: MainWindowDisplayMode
     let surfaceChanged: (RenderSurfaceDescriptor?) -> Void
     let keyboardInputChanged: (EmbeddedKeyboardEvent) -> Void
     let pumpRuntimeEvents: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            SlimGameplayHeader(
-                snapshot: snapshot,
-                displayMode: displayMode,
-                actionAvailability: actionAvailability,
-                openROMRequested: openROMRequested,
-                applyDisplayMode: applyDisplayMode,
-                pauseRequested: pauseRequested,
-                resumeRequested: resumeRequested,
-                resetRequested: resetRequested
-            )
-
+        VStack(alignment: .leading, spacing: 10) {
             if let banner = snapshot.warningBanner, snapshot.emulationState == .failed {
                 WarningBannerBar(banner: banner)
             }
@@ -465,107 +800,34 @@ private struct ActiveGameplayView: View {
                     displayMode: displayMode
                 )
             )
-
-            Spacer(minLength: 0)
         }
     }
 }
 
-private struct SlimGameplayHeader: View {
+private struct GameplayTitlebarTitle: View {
     let snapshot: SessionSnapshot
-    let displayMode: MainWindowDisplayMode
-    let actionAvailability: SessionToolbarActionAvailability
-    let openROMRequested: () -> Void
-    let applyDisplayMode: (MainWindowDisplayMode) -> Void
-    let pauseRequested: () -> Void
-    let resumeRequested: () -> Void
-    let resetRequested: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 14) {
-                    titleBlock
-                    Spacer(minLength: 12)
-                    actionRow
-                }
+        HStack(spacing: 10) {
+            Text(SessionToolbarPresentation.title(for: snapshot))
+                .font(.headline.weight(.semibold))
+                .lineLimit(1)
 
-                VStack(alignment: .leading, spacing: 12) {
-                    titleBlock
-                    actionRow
-                }
-            }
-
-            HomePanelDivider()
+            SessionStatePill(snapshot: snapshot)
         }
+        .frame(maxWidth: 320)
     }
+}
 
-    private var titleBlock: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 10) {
-                Text(SessionToolbarPresentation.title(for: snapshot))
-                    .font(.system(size: 20, weight: .semibold, design: .rounded))
-                    .lineLimit(1)
+private struct GameplayToolbarItemLabel: View {
+    let title: String
+    let systemImage: String
 
-                SessionStatePill(snapshot: snapshot)
-            }
-
-            if let subtitle = SessionToolbarPresentation.subtitle(for: snapshot) {
-                Text(subtitle)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-        }
-    }
-
-    private var actionRow: some View {
-        HStack(spacing: 8) {
-            Button(action: openROMRequested) {
-                Label("Open ROM", systemImage: "plus.circle.fill")
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(ShellPalette.accent)
-
-            Button(action: transportAction) {
-                Label(
-                    SessionToolbarPresentation.transportTitle(for: snapshot),
-                    systemImage: SessionToolbarPresentation.transportSymbolName(for: snapshot)
-                )
-            }
-            .buttonStyle(.bordered)
-            .disabled(actionAvailability.canPause == false && actionAvailability.canResume == false)
-
-            Button(action: resetRequested) {
-                Label("Reset", systemImage: "arrow.clockwise")
-            }
-            .buttonStyle(.bordered)
-            .disabled(actionAvailability.canReset == false)
-
-            Spacer(minLength: 4)
-
-            Menu {
-                ForEach(MainWindowDisplayMode.allCases, id: \.self) { mode in
-                    Button(mode.title) {
-                        applyDisplayMode(mode)
-                    }
-                    .disabled(displayMode == mode)
-                }
-            } label: {
-                Label(displayMode.title, systemImage: "display")
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-        }
-        .controlSize(.small)
-    }
-
-    private func transportAction() {
-        if snapshot.emulationState == .paused {
-            resumeRequested()
-        } else {
-            pauseRequested()
-        }
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.subheadline.weight(.semibold))
+            .labelStyle(.titleAndIcon)
+            .lineLimit(1)
     }
 }
 
@@ -576,30 +838,30 @@ struct SessionStatePill: View {
         HStack(spacing: 6) {
             Circle()
                 .fill(tintColor)
-                .frame(width: 7, height: 7)
+                .frame(width: 6, height: 6)
 
             Text(SessionToolbarPresentation.statusTitle(for: snapshot))
-                .font(.caption.weight(.semibold))
+                .font(.caption2.weight(.semibold))
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .background(.thinMaterial, in: Capsule())
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(ShellPalette.accentGlow, in: Capsule())
         .overlay {
             Capsule()
-                .strokeBorder(tintColor.opacity(0.22))
+                .strokeBorder(tintColor.opacity(0.2))
         }
     }
 
     private var tintColor: Color {
         switch snapshot.emulationState {
         case .running:
-            .green
-        case .paused:
-            .orange
-        case .booting:
             ShellPalette.accent
+        case .paused:
+            Color.orange.opacity(0.78)
+        case .booting:
+            ShellPalette.accent.opacity(0.82)
         case .failed:
-            .red
+            Color.red.opacity(0.82)
         case .stopped:
             .secondary
         }
@@ -610,25 +872,29 @@ private struct WarningBannerBar: View {
     let banner: WarningBanner
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .center, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(ShellPalette.accent)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(banner.title)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+
                 Text(banner.message)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
 
             Spacer(minLength: 0)
         }
-        .padding(.bottom, 8)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.orange.opacity(0.24))
-                .frame(height: 1)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(ShellPalette.line)
         }
     }
 }
@@ -638,20 +904,21 @@ private struct SessionStatusStrip: View {
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(alignment: .center, spacing: 14) {
+            HStack(spacing: 16) {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                     SessionStatusInlineItem(item: item)
 
                     if index < items.count - 1 {
                         Rectangle()
                             .fill(ShellPalette.line)
-                            .frame(width: 1, height: 20)
+                            .frame(width: 1, height: 14)
                     }
                 }
             }
-            .padding(.vertical, 2)
+            .padding(.horizontal, 2)
+            .padding(.top, 1)
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 ForEach(items) { item in
                     SessionStatusInlineItem(item: item)
                 }
@@ -664,19 +931,20 @@ private struct SessionStatusInlineItem: View {
     let item: SessionStatusItem
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 7) {
             Image(systemName: item.symbolName)
+                .font(.caption2.weight(.medium))
                 .foregroundStyle(.secondary)
-                .frame(width: 14)
+                .frame(width: 11)
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text(item.label)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Text(item.value)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-            }
+            Text(item.label.uppercased())
+                .font(.caption2.weight(.semibold))
+                .tracking(0.7)
+                .foregroundStyle(.secondary)
+
+            Text(item.value)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
         }
     }
 }

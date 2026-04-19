@@ -12,6 +12,7 @@ final class EmulationSession {
     private(set) var activeSettings: CoreUserSettings
     private(set) var inputMapping: InputMappingProfile
     private(set) var renderSurface: RenderSurfaceDescriptor?
+    private var deferredBootRenderSurface: RenderSurfaceDescriptor?
     private var pendingSurfaceWaiters: [UUID: CheckedContinuation<RenderSurfaceDescriptor, Never>]
 
     init(
@@ -26,12 +27,14 @@ final class EmulationSession {
         self.activeSettings = .default
         self.inputMapping = .standard
         self.renderSurface = nil
+        self.deferredBootRenderSurface = nil
         self.pendingSurfaceWaiters = [:]
     }
 
     func openROM(url: URL) async throws {
         let romIdentity = try ROMIdentity.make(for: url)
         let settings = try persistenceStore.settingsStore.loadSettings(for: romIdentity) ?? .default
+        deferredBootRenderSurface = nil
         activeSettings = settings
         snapshot = SessionSnapshot(
             emulationState: .booting,
@@ -57,10 +60,12 @@ final class EmulationSession {
 
             _ = try await coreHost.openROM(at: url, configuration: configuration)
             snapshot = try await coreHost.resume()
+            try await replayDeferredBootRenderSurfaceIfNeeded(initialDescriptor: renderSurface)
             try persistenceStore.recentGamesStore.recordLaunch(romIdentity)
             recentGames = try persistenceStore.recentGamesStore.loadRecords()
             persistenceStore.logStore.record("info", "Opened \(romIdentity.displayName) using \(snapshot.rendererName)")
         } catch {
+            deferredBootRenderSurface = nil
             snapshot = .idle
             throw error
         }
@@ -110,6 +115,22 @@ final class EmulationSession {
         snapshot.activeSaveSlot = slot
     }
 
+    func saveProtectedCloseState() async throws {
+        do {
+            try await coreHost.saveProtectedCloseState(slot: SaveStateMetadataStore.protectedCloseSlot)
+        } catch {
+            markRuntimeFailure(message: error.localizedDescription)
+            throw error
+        }
+        guard let identity = snapshot.activeROM else { return }
+        try persistenceStore.saveStateStore.recordSaveState(
+            for: identity,
+            slot: SaveStateMetadataStore.protectedCloseSlot,
+            rendererName: snapshot.rendererName,
+            kind: .protectedClose
+        )
+    }
+
     func loadState(slot: Int) async throws {
         do {
             try await coreHost.loadState(slot: slot)
@@ -118,6 +139,15 @@ final class EmulationSession {
             throw error
         }
         snapshot.activeSaveSlot = slot
+    }
+
+    func loadProtectedCloseState() async throws {
+        do {
+            try await coreHost.loadProtectedCloseState(slot: SaveStateMetadataStore.protectedCloseSlot)
+        } catch {
+            markRuntimeFailure(message: error.localizedDescription)
+            throw error
+        }
     }
 
     func updateSettings(_ settings: CoreUserSettings) async throws {
@@ -168,6 +198,13 @@ final class EmulationSession {
 
     func stop() async throws {
         try await coreHost.stop()
+        deferredBootRenderSurface = nil
+        snapshot = .idle
+    }
+
+    func dispose() async throws {
+        try await coreHost.dispose()
+        deferredBootRenderSurface = nil
         snapshot = .idle
     }
 
@@ -183,9 +220,13 @@ final class EmulationSession {
             let descriptor,
             descriptor.isValid,
             descriptor != previousDescriptor,
-            snapshot.activeROM != nil,
-            snapshot.emulationState != .booting
+            snapshot.activeROM != nil
         else {
+            return
+        }
+
+        if snapshot.emulationState == .booting {
+            deferredBootRenderSurface = descriptor
             return
         }
 
@@ -235,6 +276,20 @@ final class EmulationSession {
         for waiter in waiters {
             waiter.resume(returning: descriptor)
         }
+    }
+
+    private func replayDeferredBootRenderSurfaceIfNeeded(initialDescriptor: RenderSurfaceDescriptor) async throws {
+        guard let deferredBootRenderSurface else {
+            return
+        }
+
+        self.deferredBootRenderSurface = nil
+
+        guard deferredBootRenderSurface != initialDescriptor else {
+            return
+        }
+
+        try await coreHost.updateRenderSurface(deferredBootRenderSurface)
     }
 
     private func markRuntimeFailure(message: String) {

@@ -212,9 +212,12 @@ protocol CoreHosting: AnyObject {
     func resume() async throws -> SessionSnapshot
     func reset() async throws
     func saveState(slot: Int) async throws
+    func saveProtectedCloseState(slot: Int) async throws
     func loadState(slot: Int) async throws
+    func loadProtectedCloseState(slot: Int) async throws
     func updateSettings(_ settings: CoreUserSettings) async throws
     func updateInputMapping(_ mapping: InputMappingProfile) async throws
     func setKeyboardKey(scancode: Int32, pressed: Bool) async throws
     func stop() async throws
+    func dispose() async throws
 }

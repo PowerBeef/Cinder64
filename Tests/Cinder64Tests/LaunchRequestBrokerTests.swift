@@ -4,6 +4,15 @@ import Testing
 
 @MainActor
 struct LaunchRequestBrokerTests {
+    @Test func plainStartupWithoutLaunchArgumentsDoesNotDeliverAROM() async throws {
+        let broker = LaunchRequestBroker(arguments: ["Cinder64"])
+        var launchedURLs: [URL] = []
+
+        await broker.installHandler { launchedURLs.append($0) }
+
+        #expect(launchedURLs.isEmpty)
+    }
+
     @Test func startupArgumentsAreQueuedUntilAHandlerIsInstalled() async throws {
         let romURL = URL(fileURLWithPath: "/tmp/Super Mario 64.z64").standardizedFileURL
         let broker = LaunchRequestBroker(arguments: ["Cinder64", romURL.path])

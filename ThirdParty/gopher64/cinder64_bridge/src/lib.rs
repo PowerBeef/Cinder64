@@ -98,9 +98,20 @@ struct RuntimeSettings {
 struct EmbeddedWindowHandle(usize);
 
 impl EmbeddedWindowHandle {
-    fn as_ptr(self) -> *mut std::ffi::c_void {
-        self.0 as *mut std::ffi::c_void
+    fn as_ptr<T>(self) -> *mut T {
+        self.0 as *mut T
     }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum SDLWindowOwnership {
+    HostOwned,
+    RuntimeOwned,
+}
+
+fn should_destroy_sdl_window_on_stop(ownership: SDLWindowOwnership) -> bool {
+    matches!(ownership, SDLWindowOwnership::RuntimeOwned)
 }
 
 pub struct BridgeSession {
@@ -114,6 +125,7 @@ pub struct BridgeSession {
     last_surface_event: CString,
     frame_rate: f64,
     sdl_window: Option<EmbeddedWindowHandle>,
+    sdl_window_ownership: SDLWindowOwnership,
     runtime_status: Arc<Mutex<RuntimeStatus>>,
     emulation_thread: Option<JoinHandle<()>>,
     pump_tick_count: u64,
@@ -140,6 +152,7 @@ impl BridgeSession {
             last_surface_event: CString::new("").unwrap(),
             frame_rate: 0.0,
             sdl_window: None,
+            sdl_window_ownership: SDLWindowOwnership::HostOwned,
             runtime_status: Arc::new(Mutex::new(RuntimeStatus::default())),
             emulation_thread: None,
             pump_tick_count: 0,
@@ -294,7 +307,7 @@ fn apply_surface_update(
             let window = session
                 .sdl_window
                 .ok_or_else(|| "The embedded SDL window has not been created yet.".to_string())?;
-            ui::video::sync_embedded_window(window.as_ptr() as _)?;
+            ui::video::sync_embedded_window(window.as_ptr())?;
             session.set_surface_event(surface_event_message(
                 "attach",
                 &incoming,
@@ -306,7 +319,7 @@ fn apply_surface_update(
             let window = session
                 .sdl_window
                 .ok_or_else(|| "The embedded SDL window has not been created yet.".to_string())?;
-            ui::video::sync_embedded_window(window.as_ptr() as _)?;
+            ui::video::sync_embedded_window(window.as_ptr())?;
             session.set_surface_event(surface_event_message(
                 "resize",
                 &incoming,
@@ -320,13 +333,16 @@ fn apply_surface_update(
             let replacement_window =
                 ui::video::create_embedded_window(incoming.embedded_window_descriptor())?;
             ui::video::replace_embedded_window(
-                current_window.as_ptr() as _,
+                current_window.as_ptr(),
                 replacement_window,
                 incoming.pixel_width,
                 incoming.pixel_height,
             )?;
-            ui::video::destroy_embedded_window(current_window.as_ptr() as _);
+            if should_destroy_sdl_window_on_stop(session.sdl_window_ownership) {
+                ui::video::destroy_embedded_window(current_window.as_ptr());
+            }
             session.sdl_window = Some(EmbeddedWindowHandle(replacement_window as usize));
+            session.sdl_window_ownership = SDLWindowOwnership::HostOwned;
             session.set_surface_event(surface_event_message(
                 "reattach",
                 &incoming,
@@ -358,7 +374,7 @@ fn spawn_runtime_thread(
             }));
 
             let mut device = device::Device::new();
-            device.ui.video.window = embedded_window.as_ptr() as _;
+            device.ui.video.window = embedded_window.as_ptr();
             device.ui.video.fullscreen = settings.fullscreen;
             device.ui.audio.gain = if settings.mute_audio { 0.0 } else { 1.0 };
             device.ui.storage.save_state_slot = settings.active_save_slot.max(0) as u32;
@@ -455,12 +471,14 @@ fn spawn_runtime_thread(
 fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
     ui::video::set_hosted_mode(false);
     ui::input::reset_host_key_state();
+    let should_destroy_window = should_destroy_sdl_window_on_stop(session.sdl_window_ownership);
 
     if session.emulation_thread.is_none() {
-        if let Some(window) = session.sdl_window.take() {
-            ui::video::destroy_embedded_window(window.as_ptr() as _);
+        if should_destroy_window {
+            if let Some(window) = session.sdl_window.take() {
+                ui::video::destroy_embedded_window(window.as_ptr());
+            }
         }
-        session.sdl_window = None;
         session.last_applied_surface = None;
         session.current_rom_path = None;
         session.frame_rate = 0.0;
@@ -483,8 +501,10 @@ fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
         .ok()
         .and_then(|status| status.last_error.clone());
 
-    if let Some(window) = session.sdl_window.take() {
-        ui::video::destroy_embedded_window(window.as_ptr() as _);
+    if should_destroy_window {
+        if let Some(window) = session.sdl_window.take() {
+            ui::video::destroy_embedded_window(window.as_ptr());
+        }
     }
     session.last_applied_surface = None;
     session.current_rom_path = None;
@@ -678,7 +698,16 @@ pub unsafe extern "C" fn cinder64_bridge_open_rom(
         ui::video::ensure_video_subsystem_initialized();
         ui::video::load_vulkan_portability_library(molten_vk_library.as_deref())?;
         ui::video::set_host_viewport(surface.pixel_width, surface.pixel_height);
-        let embedded_window = ui::video::create_embedded_window(surface.embedded_window_descriptor())?;
+        let (embedded_window, window_creation_details) = if let Some(existing_window) = session.sdl_window {
+            ui::video::sync_embedded_window(existing_window.as_ptr())?;
+            (existing_window, "viewport=ok sdl-window=reuse-ok wsi=initial-bind")
+        } else {
+            let embedded_window = ui::video::create_embedded_window(surface.embedded_window_descriptor())?;
+            let embedded_window = EmbeddedWindowHandle(embedded_window as usize);
+            session.sdl_window = Some(embedded_window);
+            session.sdl_window_ownership = SDLWindowOwnership::HostOwned;
+            (embedded_window, "viewport=ok sdl-window=create-ok wsi=initial-bind")
+        };
 
         session.settings = RuntimeSettings {
             fullscreen: fullscreen != 0,
@@ -691,12 +720,12 @@ pub unsafe extern "C" fn cinder64_bridge_open_rom(
         };
         session.current_rom_path = Some(rom_path);
         session.runtime_directories = Some(runtime_directories.clone());
-        session.sdl_window = Some(EmbeddedWindowHandle(embedded_window as usize));
+        session.sdl_window = Some(embedded_window);
         session.last_applied_surface = Some(surface.clone());
         session.set_surface_event(surface_event_message(
             "attach",
             &surface,
-            "viewport=ok sdl-window=create-ok wsi=initial-bind",
+            window_creation_details,
         ));
         session.renderer_name = CString::new("gopher64 + parallel-rdp (embedded)").unwrap();
         session.frame_rate = 0.0;
@@ -720,7 +749,7 @@ pub unsafe extern "C" fn cinder64_bridge_open_rom(
             rom_contents,
             runtime_directories,
             session.settings.clone(),
-            session.sdl_window.unwrap(),
+            embedded_window,
             runtime_status,
             startup_tx,
         ));

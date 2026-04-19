@@ -6,18 +6,18 @@ struct SettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Settings")
                         .font(.system(size: 28, weight: .semibold, design: .rounded))
-                    Text("Display, audio, and speed controls for the current front-end experience.")
+                    Text("Window, audio, and speed controls for the front end.")
                         .foregroundStyle(.secondary)
                 }
 
-                SettingsPanel {
+                VStack(alignment: .leading, spacing: 0) {
                     SettingsSection(
                         title: "Display",
-                        subtitle: "Fixed window modes and video presentation."
+                        subtitle: "Fixed window modes and renderer presentation."
                     ) {
                         Picker("Display Mode", selection: displayModeBinding) {
                             ForEach(MainWindowDisplayMode.allCases, id: \.self) { mode in
@@ -39,7 +39,7 @@ struct SettingsView: View {
 
                     SettingsSection(
                         title: "Audio",
-                        subtitle: "Keep gameplay sound live or mute it entirely."
+                        subtitle: "Keep gameplay live or mute it entirely."
                     ) {
                         Toggle("Mute audio", isOn: binding(for: \.muteAudio))
                     }
@@ -48,7 +48,7 @@ struct SettingsView: View {
 
                     SettingsSection(
                         title: "Performance",
-                        subtitle: "Adjust the pace of emulation without changing the shell."
+                        subtitle: "Adjust emulation speed without changing the shell."
                     ) {
                         Stepper(value: binding(for: \.speedPercent), in: 25 ... 300, step: 5) {
                             LabeledContent("Speed", value: "\(session.activeSettings.speedPercent)%")
@@ -56,8 +56,10 @@ struct SettingsView: View {
                     }
                 }
             }
-            .padding(24)
-            .frame(maxWidth: 760, alignment: .topLeading)
+            .padding(.horizontal, 24)
+            .padding(.top, 22)
+            .padding(.bottom, 28)
+            .frame(maxWidth: 840, alignment: .topLeading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .background(.clear)
@@ -86,26 +88,6 @@ struct SettingsView: View {
     }
 }
 
-private struct SettingsPanel<Content: View>: View {
-    let content: Content
-
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            content
-        }
-        .padding(22)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(ShellPalette.line)
-        }
-    }
-}
-
 private struct SettingsSection<Content: View>: View {
     let title: String
     let subtitle: String
@@ -123,17 +105,18 @@ private struct SettingsSection<Content: View>: View {
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 28) {
+            HStack(alignment: .top, spacing: 36) {
                 summaryColumn
-                    .frame(width: 220, alignment: .topLeading)
+                    .frame(width: 240, alignment: .topLeading)
                 controlColumn
             }
 
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 16) {
                 summaryColumn
                 controlColumn
             }
         }
+        .padding(.vertical, 18)
     }
 
     private var summaryColumn: some View {
@@ -160,6 +143,5 @@ private struct SettingsSectionDivider: View {
         Rectangle()
             .fill(ShellPalette.line)
             .frame(height: 1)
-            .padding(.vertical, 18)
     }
 }
