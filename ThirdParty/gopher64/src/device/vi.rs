@@ -114,6 +114,7 @@ pub fn write_regs(device: &mut device::Device, address: u64, value: u32, mask: u
             if device.vi.regs[reg as usize] != device.vi.last_origin {
                 device.vi.last_origin = device.vi.regs[reg as usize];
                 device.vi.internal_frame_counter += 1;
+                ui::video::record_presented_frame();
             }
         }
         _ => {
@@ -129,6 +130,7 @@ pub fn vertical_interrupt_event(device: &mut device::Device) {
     }
 
     ui::video::render_frame();
+    ui::video::record_vi_event();
 
     retroachievements::do_frame();
 

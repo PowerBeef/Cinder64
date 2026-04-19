@@ -201,6 +201,7 @@ struct CoreHostConfiguration: Equatable, Sendable {
 
 enum CoreRuntimeEvent: Equatable, Sendable {
     case runtimeTerminated(String)
+    case frameRateUpdated(Double)
 }
 
 @MainActor

@@ -203,6 +203,10 @@ final class Gopher64Bridge: @unchecked Sendable {
         RuntimeState(rawValue: runtime.runtimeState(session.rawValue)) ?? .inactive
     }
 
+    func frameRate(session: Session) -> Double {
+        runtime.frameRate(session.rawValue)
+    }
+
     func lastError(session: Session) -> String? {
         runtime.string(from: runtime.lastError(session.rawValue))
     }

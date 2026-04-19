@@ -182,6 +182,34 @@ struct EmulationSessionTests {
         #expect(core.surfaceUpdates == [settledSurface])
     }
 
+    @Test func runtimeFrameRateUpdatesRefreshTheSessionSnapshot() async throws {
+        let harness = try TemporaryDirectoryHarness()
+        let persistence = PersistenceStore(
+            recentGamesStore: RecentGamesStore(storageURL: harness.directory.appending(path: "recent.json")),
+            saveStateStore: SaveStateMetadataStore(storageURL: harness.directory.appending(path: "savestates.json"))
+        )
+        let core = FakeCoreHost()
+        let session = EmulationSession(coreHost: core, persistenceStore: persistence)
+        let romURL = harness.directory.appending(path: "Mario Kart 64.z64")
+        try Data("rom-data".utf8).write(to: romURL)
+        session.updateRenderSurface(
+            RenderSurfaceDescriptor(
+                windowHandle: 0xABCDABCD,
+                viewHandle: 0xFACADE,
+                width: 1280,
+                height: 720,
+                backingScaleFactor: 2
+            )
+        )
+
+        try await session.openROM(url: romURL)
+        core.nextPumpEvent = .frameRateUpdated(52.4)
+
+        session.pumpRuntimeEvents()
+
+        #expect(session.snapshot.fps == 52.4)
+    }
+
     @Test func savingStateUpdatesMetadataForTheSelectedSlot() async throws {
         let harness = try TemporaryDirectoryHarness()
         let persistence = PersistenceStore(

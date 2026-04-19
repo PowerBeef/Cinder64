@@ -42,6 +42,10 @@ final class Gopher64CoreHost: CoreHosting {
     func pumpEvents() -> CoreRuntimeEvent? {
         let event = executor.pumpEvents()
         recordFrameCountIfNeeded()
+        if let frameRate = executor.frameRate(), abs(frameRate - currentSnapshot.fps) >= 0.1 {
+            currentSnapshot.fps = frameRate
+            return event ?? .frameRateUpdated(frameRate)
+        }
         return event
     }
 
@@ -209,6 +213,11 @@ private final class Gopher64CoreExecutor {
     func frameCount() -> UInt64? {
         guard let bridge, let session else { return nil }
         return bridge.frameCount(session: session)
+    }
+
+    func frameRate() -> Double? {
+        guard let bridge, let session else { return nil }
+        return bridge.frameRate(session: session)
     }
 
     func pause() throws {
