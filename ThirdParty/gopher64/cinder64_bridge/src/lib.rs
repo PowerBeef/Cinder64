@@ -6,7 +6,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const VERSION: &[u8] = b"gopher64-cinder64-bridge 0.2.0\0";
 
@@ -129,6 +129,7 @@ pub struct BridgeSession {
     runtime_status: Arc<Mutex<RuntimeStatus>>,
     emulation_thread: Option<JoinHandle<()>>,
     pump_tick_count: u64,
+    last_metrics_sample_at: Option<Instant>,
 }
 
 impl BridgeSession {
@@ -156,6 +157,7 @@ impl BridgeSession {
             runtime_status: Arc::new(Mutex::new(RuntimeStatus::default())),
             emulation_thread: None,
             pump_tick_count: 0,
+            last_metrics_sample_at: None,
         }
     }
 
@@ -201,6 +203,37 @@ impl BridgeSession {
 
 fn sanitize_c_string(message: &str) -> CString {
     CString::new(message.replace('\0', " ")).unwrap()
+}
+
+fn update_measured_frame_rate(
+    session: &mut BridgeSession,
+    now: Instant,
+    counters: (u32, u32),
+) -> Option<f64> {
+    let Some(last_sample_at) = session.last_metrics_sample_at else {
+        session.last_metrics_sample_at = Some(now);
+        return None;
+    };
+
+    let elapsed = now.saturating_duration_since(last_sample_at);
+    if elapsed < Duration::from_secs(1) {
+        return None;
+    }
+
+    session.last_metrics_sample_at = Some(now);
+
+    let (frames_rendered, vi_events) = counters;
+    if vi_events == 0 {
+        return None;
+    }
+
+    let measured = frames_rendered as f64 / elapsed.as_secs_f64();
+    session.frame_rate = measured;
+    if let Ok(mut status) = session.runtime_status.lock() {
+        status.frame_rate = measured;
+    }
+
+    Some(measured)
 }
 
 unsafe fn session_from_ptr<'a>(session: *mut BridgeSession) -> Result<&'a mut BridgeSession, i32> {
@@ -470,6 +503,7 @@ fn spawn_runtime_thread(
 
 fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
     ui::video::set_hosted_mode(false);
+    ui::video::reset_runtime_counters();
     ui::input::reset_host_key_state();
     let should_destroy_window = should_destroy_sdl_window_on_stop(session.sdl_window_ownership);
 
@@ -482,6 +516,7 @@ fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
         session.last_applied_surface = None;
         session.current_rom_path = None;
         session.frame_rate = 0.0;
+        session.last_metrics_sample_at = None;
         return Ok(());
     }
 
@@ -509,6 +544,7 @@ fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
     session.last_applied_surface = None;
     session.current_rom_path = None;
     session.frame_rate = 0.0;
+    session.last_metrics_sample_at = None;
     if let Ok(mut status) = session.runtime_status.lock() {
         status.active = false;
         status.running = false;
@@ -741,6 +777,7 @@ pub unsafe extern "C" fn cinder64_bridge_open_rom(
 
         ui::input::reset_host_key_state();
         ui::video::set_hosted_mode(true);
+        ui::video::reset_runtime_counters();
         ui::video::set_initial_paused(true);
 
         let (startup_tx, startup_rx) = mpsc::channel();
@@ -757,6 +794,7 @@ pub unsafe extern "C" fn cinder64_bridge_open_rom(
         match startup_rx.recv_timeout(Duration::from_secs(15)) {
             Ok(Ok(frame_rate)) => {
                 session.frame_rate = frame_rate;
+                session.last_metrics_sample_at = Some(Instant::now());
                 session.clear_error();
                 Ok(())
             }
@@ -828,6 +866,15 @@ pub unsafe extern "C" fn cinder64_bridge_pump_events(session: *mut BridgeSession
                 .unwrap_or(false);
             if is_running {
                 session.pump_tick_count = session.pump_tick_count.saturating_add(1);
+                let now = Instant::now();
+                let sample_due = session
+                    .last_metrics_sample_at
+                    .map(|last_sample_at| now.saturating_duration_since(last_sample_at) >= Duration::from_secs(1))
+                    .unwrap_or(true);
+                if sample_due {
+                    let counters = ui::video::take_runtime_counters();
+                    let _ = update_measured_frame_rate(session, now, counters);
+                }
             }
             0
         }
@@ -877,6 +924,8 @@ pub unsafe extern "C" fn cinder64_bridge_resume(session: *mut BridgeSession) -> 
     }
 
     ui::video::set_paused(false);
+    ui::video::reset_runtime_counters();
+    session.last_metrics_sample_at = Some(Instant::now());
     if let Ok(mut status) = session.runtime_status.lock() {
         status.running = true;
         status.paused = false;

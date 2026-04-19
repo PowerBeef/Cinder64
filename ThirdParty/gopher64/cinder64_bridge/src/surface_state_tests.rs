@@ -1,10 +1,13 @@
 use crate::{
+    BridgeSession,
     HostSurfaceDescriptor,
     SDLWindowOwnership,
     SurfaceApplyAction,
     determine_surface_apply_action,
     should_destroy_sdl_window_on_stop,
+    update_measured_frame_rate,
 };
+use std::time::{Duration, Instant};
 
 fn make_surface(
     window_handle: usize,
@@ -92,4 +95,20 @@ fn host_owned_sdl_windows_are_preserved_when_stopping() {
 #[test]
 fn runtime_owned_sdl_windows_are_destroyed_when_stopping() {
     assert!(should_destroy_sdl_window_on_stop(SDLWindowOwnership::RuntimeOwned));
+}
+
+#[test]
+fn measured_frame_rate_updates_after_a_one_second_sample_window() {
+    let mut session = BridgeSession::new();
+    let sample_start = Instant::now() - Duration::from_secs(1);
+    session.last_metrics_sample_at = Some(sample_start);
+
+    let frame_rate = update_measured_frame_rate(
+        &mut session,
+        sample_start + Duration::from_millis(1_000),
+        (58, 60),
+    );
+
+    assert_eq!(frame_rate, Some(58.0));
+    assert_eq!(session.frame_rate, 58.0);
 }

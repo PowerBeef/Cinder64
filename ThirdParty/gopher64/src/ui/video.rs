@@ -6,7 +6,7 @@ use std::ffi::c_void;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 const PAL_WIDESCREEN_WIDTH: i32 = 512;
 const PAL_STANDARD_WIDTH: i32 = 384;
@@ -30,6 +30,8 @@ unsafe extern "C" {
 }
 
 static HOSTED_RUNTIME_ACTIVE: AtomicBool = AtomicBool::new(false);
+static RUNTIME_FRAME_EVENTS: AtomicU32 = AtomicU32::new(0);
+static RUNTIME_VI_EVENTS: AtomicU32 = AtomicU32::new(0);
 
 pub struct EmbeddedWindowDescriptor {
     pub cocoa_window: *mut c_void,
@@ -175,6 +177,30 @@ pub fn set_hosted_mode(hosted: bool) {
     HOSTED_RUNTIME_ACTIVE.store(hosted, Ordering::SeqCst);
 }
 
+pub fn reset_runtime_counters() {
+    RUNTIME_FRAME_EVENTS.store(0, Ordering::SeqCst);
+    RUNTIME_VI_EVENTS.store(0, Ordering::SeqCst);
+}
+
+pub fn record_presented_frame() {
+    if HOSTED_RUNTIME_ACTIVE.load(Ordering::SeqCst) {
+        RUNTIME_FRAME_EVENTS.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+pub fn record_vi_event() {
+    if HOSTED_RUNTIME_ACTIVE.load(Ordering::SeqCst) {
+        RUNTIME_VI_EVENTS.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+pub fn take_runtime_counters() -> (u32, u32) {
+    (
+        RUNTIME_FRAME_EVENTS.swap(0, Ordering::SeqCst),
+        RUNTIME_VI_EVENTS.swap(0, Ordering::SeqCst),
+    )
+}
+
 pub fn set_host_viewport(width: u32, height: u32) {
     unsafe {
         rdp_set_host_viewport(width.max(1), height.max(1));
@@ -230,6 +256,7 @@ fn build_gfx_info(device: &mut device::Device) -> GFX_INFO {
         PAL: device.cart.pal,
         widescreen: device.ui.config.video.widescreen,
         fullscreen: device.ui.video.fullscreen,
+        vsync: true,
         integer_scaling: device.ui.config.video.integer_scaling,
         upscale: device.ui.config.video.upscale,
         crt: device.ui.config.video.crt,
@@ -239,6 +266,7 @@ fn build_gfx_info(device: &mut device::Device) -> GFX_INFO {
 pub fn init(device: &mut device::Device) {
     ui::sdl_init(sdl3_sys::init::SDL_INIT_VIDEO);
     ui::ttf_init();
+    reset_runtime_counters();
 
     let embedded_window = !device.ui.video.window.is_null();
     device.ui.video.host_owned_window =
@@ -311,7 +339,6 @@ pub fn init(device: &mut device::Device) {
             font_bytes.as_ptr() as *const std::ffi::c_void,
             font_bytes.len(),
             device.ui.storage.save_state_slot,
-            device.netplay.is_some(),
         )
     };
 
@@ -327,6 +354,7 @@ pub fn close(ui: &ui::Ui) {
             sdl3_sys::video::SDL_DestroyWindow(ui.video.window);
         }
     }
+    reset_runtime_counters();
 }
 
 pub fn last_close_error() -> Option<String> {

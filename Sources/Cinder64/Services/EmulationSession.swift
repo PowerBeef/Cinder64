@@ -248,6 +248,8 @@ final class EmulationSession {
 
         if let event = coreHost.pumpEvents() {
             switch event {
+            case let .frameRateUpdated(frameRate):
+                snapshot.fps = frameRate
             case let .runtimeTerminated(message):
                 markRuntimeFailure(message: message)
             }
