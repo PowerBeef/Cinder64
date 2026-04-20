@@ -1,8 +1,15 @@
 import Foundation
+import OSLog
 
 @MainActor
 final class Gopher64CoreHost: CoreHosting {
+    private static let signposter = OSSignposter(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.patricedery.Cinder64",
+        category: "Runtime"
+    )
+
     private let logStore: LogStore
+    private let metricsArtifactStore: RuntimeMetricsArtifactStore
     private let executor: Gopher64CoreExecutor
     private var currentSnapshot = SessionSnapshot.idle
     private var lastLoggedFrameCount: UInt64 = 0
@@ -13,35 +20,61 @@ final class Gopher64CoreHost: CoreHosting {
         runtimeLocator: BundledGopher64RuntimeLocator = BundledGopher64RuntimeLocator()
     ) {
         self.logStore = logStore
+        self.metricsArtifactStore = RuntimeMetricsArtifactStore(logStore: logStore)
         self.executor = Gopher64CoreExecutor(logStore: logStore, runtimeLocator: runtimeLocator)
     }
 
     func openROM(at url: URL, configuration: CoreHostConfiguration) async throws -> SessionSnapshot {
+        let interval = Self.signposter.beginInterval("Open ROM")
+        recordStartupPhase("open-requested")
         guard let renderSurface = configuration.renderSurface, renderSurface.isValid else {
+            Self.signposter.endInterval("Open ROM", interval)
             throw Gopher64CoreHostError.renderSurfaceUnavailable
         }
 
-        let runtime = try await executor.openROM(at: url, configuration: configuration)
-        currentSnapshot = SessionSnapshot(
-            emulationState: .paused,
-            activeROM: configuration.romIdentity,
-            rendererName: runtime.rendererName,
-            fps: runtime.frameRate,
-            videoMode: configuration.settings.startFullscreen ? .fullscreen : .windowed,
-            audioMuted: configuration.settings.muteAudio,
-            activeSaveSlot: 0,
-            warningBanner: nil
-        )
-        return currentSnapshot
+        do {
+            let runtime = try await executor.openROM(at: url, configuration: configuration)
+            recordStartupPhase("surface-attached")
+            recordStartupPhase("rom-opened")
+            currentSnapshot = SessionSnapshot(
+                emulationState: .paused,
+                activeROM: configuration.romIdentity,
+                rendererName: runtime.rendererName,
+                fps: runtime.frameRate,
+                videoMode: configuration.settings.startFullscreen ? .fullscreen : .windowed,
+                audioMuted: configuration.settings.muteAudio,
+                activeSaveSlot: 0,
+                warningBanner: nil
+            )
+            recordMetricsIfAvailable()
+            Self.signposter.endInterval("Open ROM", interval)
+            return currentSnapshot
+        } catch {
+            recordMetricsError(error.localizedDescription)
+            Self.signposter.endInterval("Open ROM", interval)
+            throw error
+        }
     }
 
     func updateRenderSurface(_ descriptor: RenderSurfaceDescriptor) async throws {
-        try executor.updateRenderSurface(descriptor)
+        let interval = Self.signposter.beginInterval("Update Surface")
+        do {
+            try executor.updateRenderSurface(descriptor)
+            recordMetricsIfAvailable()
+            Self.signposter.endInterval("Update Surface", interval)
+        } catch {
+            recordMetricsError(error.localizedDescription)
+            Self.signposter.endInterval("Update Surface", interval)
+            throw error
+        }
     }
 
     func pumpEvents() -> CoreRuntimeEvent? {
+        let interval = Self.signposter.beginInterval("Pump Drain")
+        defer { Self.signposter.endInterval("Pump Drain", interval) }
         let event = executor.pumpEvents()
         recordFrameCountIfNeeded()
+        recordMetricsIfAvailable()
         if let frameRate = executor.frameRate(), abs(frameRate - currentSnapshot.fps) >= 0.1 {
             currentSnapshot.fps = frameRate
             return event ?? .frameRateUpdated(frameRate)
@@ -50,9 +83,10 @@ final class Gopher64CoreHost: CoreHosting {
     }
 
     private func recordFrameCountIfNeeded() {
-        guard let count = executor.frameCount() else {
+        guard let metrics = executor.metrics() else {
             return
         }
+        let count = metrics.renderFrameCount
         let now = Date.now
         let elapsed = lastFrameLogAt.map { now.timeIntervalSince($0) } ?? .infinity
         guard elapsed >= 1.0 else {
@@ -61,42 +95,73 @@ final class Gopher64CoreHost: CoreHosting {
         guard count != lastLoggedFrameCount else {
             return
         }
-        logStore.record("info", "frame_count=\(count)")
+        logStore.record(
+            "info",
+            "frame_count=\(count) pump_tick_count=\(metrics.pumpTickCount) vi_count=\(metrics.viCount) present_count=\(metrics.presentCount)"
+        )
         lastLoggedFrameCount = count
         lastFrameLogAt = now
     }
 
     func pause() async throws {
+        let interval = Self.signposter.beginInterval("Pause")
         try executor.pause()
         currentSnapshot.emulationState = .paused
+        recordMetricsIfAvailable()
+        Self.signposter.endInterval("Pause", interval)
     }
 
     func resume() async throws -> SessionSnapshot {
-        try executor.resume()
-        currentSnapshot.emulationState = .running
-        return currentSnapshot
+        let interval = Self.signposter.beginInterval("Resume")
+        do {
+            try executor.resume()
+            currentSnapshot.emulationState = .running
+            recordStartupPhase("resumed")
+            recordMetricsIfAvailable()
+            Self.signposter.endInterval("Resume", interval)
+            return currentSnapshot
+        } catch {
+            recordMetricsError(error.localizedDescription)
+            Self.signposter.endInterval("Resume", interval)
+            throw error
+        }
     }
 
     func reset() async throws {
+        let interval = Self.signposter.beginInterval("Reset")
         try executor.reset()
+        recordMetricsIfAvailable()
+        Self.signposter.endInterval("Reset", interval)
     }
 
     func saveState(slot: Int) async throws {
+        let interval = Self.signposter.beginInterval("Save State")
         try executor.saveState(slot: slot)
         currentSnapshot.activeSaveSlot = slot
+        recordMetricsIfAvailable()
+        Self.signposter.endInterval("Save State", interval)
     }
 
     func saveProtectedCloseState(slot: Int) async throws {
+        let interval = Self.signposter.beginInterval("Save Protected Close State")
         try executor.saveState(slot: slot)
+        recordMetricsIfAvailable()
+        Self.signposter.endInterval("Save Protected Close State", interval)
     }
 
     func loadState(slot: Int) async throws {
+        let interval = Self.signposter.beginInterval("Load State")
         try executor.loadState(slot: slot)
         currentSnapshot.activeSaveSlot = slot
+        recordMetricsIfAvailable()
+        Self.signposter.endInterval("Load State", interval)
     }
 
     func loadProtectedCloseState(slot: Int) async throws {
+        let interval = Self.signposter.beginInterval("Load Protected Close State")
         try executor.loadState(slot: slot)
+        recordMetricsIfAvailable()
+        Self.signposter.endInterval("Load Protected Close State", interval)
     }
 
     func updateSettings(_ settings: CoreUserSettings) async throws {
@@ -128,13 +193,69 @@ final class Gopher64CoreHost: CoreHosting {
     }
 
     func stop() async throws {
-        try await executor.stop()
-        currentSnapshot = .idle
+        let interval = Self.signposter.beginInterval("Stop")
+        recordShutdownPhase("stop-requested")
+        do {
+            try await executor.stop()
+            recordShutdownPhase("stopped")
+            currentSnapshot = .idle
+            recordMetricsIfAvailable()
+            Self.signposter.endInterval("Stop", interval)
+        } catch {
+            recordMetricsError(error.localizedDescription)
+            Self.signposter.endInterval("Stop", interval)
+            throw error
+        }
     }
 
     func dispose() async throws {
-        try await executor.dispose()
-        currentSnapshot = .idle
+        let interval = Self.signposter.beginInterval("Dispose")
+        recordShutdownPhase("dispose-requested")
+        do {
+            try await executor.dispose()
+            recordShutdownPhase("disposed")
+            currentSnapshot = .idle
+            recordMetricsIfAvailable()
+            Self.signposter.endInterval("Dispose", interval)
+        } catch {
+            recordMetricsError(error.localizedDescription)
+            Self.signposter.endInterval("Dispose", interval)
+            throw error
+        }
+    }
+
+    private func recordStartupPhase(_ phase: String) {
+        metricsArtifactStore.update { artifact in
+            if artifact.startupPhases.contains(phase) == false {
+                artifact.startupPhases.append(phase)
+            }
+        }
+    }
+
+    private func recordShutdownPhase(_ phase: String) {
+        metricsArtifactStore.update { artifact in
+            artifact.shutdownPhases.append(phase)
+        }
+    }
+
+    private func recordMetricsIfAvailable() {
+        guard let metrics = executor.metrics() else {
+            return
+        }
+
+        metricsArtifactStore.update { artifact in
+            artifact.pumpTickCount = metrics.pumpTickCount
+            artifact.viCount = metrics.viCount
+            artifact.renderFrameCount = metrics.renderFrameCount
+            artifact.presentCount = metrics.presentCount
+            artifact.currentFPS = metrics.frameRateHz
+        }
+    }
+
+    private func recordMetricsError(_ message: String) {
+        metricsArtifactStore.update { artifact in
+            artifact.lastStructuredError = RuntimeMetricsArtifactError(message: message)
+        }
     }
 }
 
@@ -192,7 +313,13 @@ private final class Gopher64CoreExecutor {
 
     func pumpEvents() -> CoreRuntimeEvent? {
         guard let bridge, let session else { return nil }
-        bridge.pumpEvents(session: session)
+        do {
+            try bridge.pumpEvents(session: session)
+        } catch {
+            let message = error.localizedDescription
+            logStore.record("warning", "Embedded runtime pump failed: \(message)")
+            return .runtimeTerminated(message)
+        }
         guard bridge.runtimeState(session: session) == .inactive else {
             return nil
         }
@@ -218,6 +345,20 @@ private final class Gopher64CoreExecutor {
     func frameRate() -> Double? {
         guard let bridge, let session else { return nil }
         return bridge.frameRate(session: session)
+    }
+
+    func metrics() -> CoreRuntimeMetrics? {
+        guard let bridge, let session else { return nil }
+        let metrics = bridge.metrics(session: session)
+        return CoreRuntimeMetrics(
+            pumpTickCount: metrics.pumpTickCount,
+            viCount: metrics.viCount,
+            renderFrameCount: metrics.renderFrameCount,
+            presentCount: metrics.presentCount,
+            frameRateHz: metrics.frameRateHz,
+            pendingCommandCount: metrics.pendingCommandCount,
+            runtimeState: metrics.runtimeState.rawValue
+        )
     }
 
     func pause() throws {

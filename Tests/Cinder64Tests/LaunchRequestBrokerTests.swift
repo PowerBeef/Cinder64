@@ -73,4 +73,37 @@ struct LaunchRequestBrokerTests {
 
         #expect(launchedURLs == [romURL])
     }
+
+    @Test func scriptedKeyStepsCanBeLoadedFromTheEnvironment() async throws {
+        let broker = LaunchRequestBroker(
+            arguments: ["Cinder64"],
+            environment: [
+                "CINDER64_SCRIPTED_KEYS": "100:40:down;200:40:up",
+            ]
+        )
+
+        #expect(broker.scriptedKeyParseError == nil)
+        #expect(broker.scriptedKeySteps == [
+            ScriptedKeyStep(offsetMilliseconds: 100, scancode: 40, isPressed: true),
+            ScriptedKeyStep(offsetMilliseconds: 200, scancode: 40, isPressed: false),
+        ])
+    }
+
+    @Test func commandLineScriptedKeysOverrideTheEnvironment() async throws {
+        let broker = LaunchRequestBroker(
+            arguments: [
+                "Cinder64",
+                "--scripted-keys",
+                "100:40:down",
+            ],
+            environment: [
+                "CINDER64_SCRIPTED_KEYS": "200:41:down",
+            ]
+        )
+
+        #expect(broker.scriptedKeyParseError == nil)
+        #expect(broker.scriptedKeySteps == [
+            ScriptedKeyStep(offsetMilliseconds: 100, scancode: 40, isPressed: true),
+        ])
+    }
 }

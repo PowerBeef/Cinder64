@@ -1,3 +1,4 @@
+import Cinder64BridgeABI
 import Darwin
 import Foundation
 
@@ -6,6 +7,26 @@ final class Gopher64Bridge: @unchecked Sendable {
         case inactive = 0
         case paused = 1
         case running = 2
+    }
+
+    struct Metrics: Equatable, Sendable {
+        let pumpTickCount: UInt64
+        let viCount: UInt64
+        let renderFrameCount: UInt64
+        let presentCount: UInt64
+        let frameRateHz: Double
+        let pendingCommandCount: UInt64
+        let runtimeState: RuntimeState
+
+        static let zero = Metrics(
+            pumpTickCount: 0,
+            viCount: 0,
+            renderFrameCount: 0,
+            presentCount: 0,
+            frameRateHz: 0,
+            pendingCommandCount: 0,
+            runtimeState: .inactive
+        )
     }
 
     final class Session: @unchecked Sendable {
@@ -49,18 +70,9 @@ final class Gopher64Bridge: @unchecked Sendable {
             throw Gopher64BridgeError.invalidRenderSurface
         }
 
+        var surface = runtime.surfaceDescriptor(from: descriptor)
         try ensureSuccess(
-            runtime.attachSurface(
-                session.rawValue,
-                descriptor.windowHandle,
-                descriptor.viewHandle,
-                Int32(descriptor.logicalWidth),
-                Int32(descriptor.logicalHeight),
-                Int32(descriptor.pixelWidth),
-                Int32(descriptor.pixelHeight),
-                descriptor.backingScaleFactor,
-                descriptor.revision
-            ),
+            runtime.attachSurface(session.rawValue, &surface),
             session: session,
             context: "attaching the render surface"
         )
@@ -71,18 +83,9 @@ final class Gopher64Bridge: @unchecked Sendable {
             throw Gopher64BridgeError.invalidRenderSurface
         }
 
+        var surface = runtime.surfaceDescriptor(from: descriptor)
         try ensureSuccess(
-            runtime.updateSurface(
-                session.rawValue,
-                descriptor.windowHandle,
-                descriptor.viewHandle,
-                Int32(descriptor.logicalWidth),
-                Int32(descriptor.logicalHeight),
-                Int32(descriptor.pixelWidth),
-                Int32(descriptor.pixelHeight),
-                descriptor.backingScaleFactor,
-                descriptor.revision
-            ),
+            runtime.updateSurface(session.rawValue, &surface),
             session: session,
             context: "updating the render surface"
         )
@@ -94,52 +97,45 @@ final class Gopher64Bridge: @unchecked Sendable {
         try FileManager.default.createDirectory(at: directories.dataDirectory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: directories.cacheDirectory, withIntermediateDirectories: true)
 
+        let settings = runtime.settings(from: configuration.settings)
+
         let result = url.path.withCString { romPath in
             directories.configDirectory.path.withCString { configPath in
                 directories.dataDirectory.path.withCString { dataPath in
                     directories.cacheDirectory.path.withCString { cachePath in
                         if let moltenVKLibraryURL = runtimePaths.moltenVKLibraryURL {
                             return moltenVKLibraryURL.path.withCString { moltenVKPath in
-                                runtime.openROM(
-                                    session.rawValue,
-                                    romPath,
-                                    configPath,
-                                    dataPath,
-                                    cachePath,
-                                    moltenVKPath,
-                                    configuration.settings.startFullscreen ? 1 : 0,
-                                    configuration.settings.muteAudio ? 1 : 0,
-                                    Int32(configuration.settings.speedPercent),
-                                    Int32(configuration.settings.upscaleMultiplier),
-                                    configuration.settings.integerScaling ? 1 : 0,
-                                    configuration.settings.crtFilterEnabled ? 1 : 0
+                                var request = Cinder64OpenROMRequest(
+                                    rom_path: romPath,
+                                    config_dir: configPath,
+                                    data_dir: dataPath,
+                                    cache_dir: cachePath,
+                                    molten_vk_library: moltenVKPath,
+                                    settings: settings
                                 )
+                                return runtime.openROM(session.rawValue, &request)
                             }
                         }
 
-                        return runtime.openROM(
-                            session.rawValue,
-                            romPath,
-                            configPath,
-                            dataPath,
-                            cachePath,
-                            nil,
-                            configuration.settings.startFullscreen ? 1 : 0,
-                            configuration.settings.muteAudio ? 1 : 0,
-                            Int32(configuration.settings.speedPercent),
-                            Int32(configuration.settings.upscaleMultiplier),
-                            configuration.settings.integerScaling ? 1 : 0,
-                            configuration.settings.crtFilterEnabled ? 1 : 0
+                        var request = Cinder64OpenROMRequest(
+                            rom_path: romPath,
+                            config_dir: configPath,
+                            data_dir: dataPath,
+                            cache_dir: cachePath,
+                            molten_vk_library: nil,
+                            settings: settings
                         )
+                        return runtime.openROM(session.rawValue, &request)
                     }
                 }
             }
         }
 
         try ensureSuccess(result, session: session, context: "opening the ROM")
+        let metrics = self.metrics(session: session)
         return (
             runtime.string(from: runtime.rendererName(session.rawValue)) ?? "gopher64",
-            runtime.frameRate(session.rawValue)
+            metrics.frameRateHz
         )
     }
 
@@ -164,16 +160,9 @@ final class Gopher64Bridge: @unchecked Sendable {
     }
 
     func updateSettings(_ settings: CoreUserSettings, session: Session) throws {
+        var runtimeSettings = runtime.settings(from: settings)
         try ensureSuccess(
-            runtime.updateSettings(
-                session.rawValue,
-                settings.startFullscreen ? 1 : 0,
-                settings.muteAudio ? 1 : 0,
-                Int32(settings.speedPercent),
-                Int32(settings.upscaleMultiplier),
-                settings.integerScaling ? 1 : 0,
-                settings.crtFilterEnabled ? 1 : 0
-            ),
+            runtime.updateSettings(session.rawValue, &runtimeSettings),
             session: session,
             context: "updating runtime settings"
         )
@@ -191,75 +180,139 @@ final class Gopher64Bridge: @unchecked Sendable {
         try ensureSuccess(runtime.stop(session.rawValue), session: session, context: "stopping emulation")
     }
 
-    func pumpEvents(session: Session) {
-        _ = runtime.pumpEvents(session.rawValue)
+    func pumpEvents(session: Session) throws {
+        try ensureSuccess(runtime.pumpEvents(session.rawValue), session: session, context: "pumping runtime events")
+    }
+
+    func metrics(session: Session) -> Metrics {
+        var raw = Cinder64Metrics(
+            pump_tick_count: 0,
+            vi_count: 0,
+            render_frame_count: 0,
+            present_count: 0,
+            frame_rate_hz: 0,
+            pending_command_count: 0,
+            runtime_state: 0,
+            reserved: 0
+        )
+
+        guard runtime.getMetrics(session.rawValue, &raw) == BridgeStatus.ok.rawValue else {
+            return .zero
+        }
+
+        return Metrics(
+            pumpTickCount: raw.pump_tick_count,
+            viCount: raw.vi_count,
+            renderFrameCount: raw.render_frame_count,
+            presentCount: raw.present_count,
+            frameRateHz: raw.frame_rate_hz,
+            pendingCommandCount: raw.pending_command_count,
+            runtimeState: RuntimeState(rawValue: raw.runtime_state) ?? .inactive
+        )
     }
 
     func frameCount(session: Session) -> UInt64 {
-        runtime.frameCount(session.rawValue)
+        metrics(session: session).renderFrameCount
     }
 
     func runtimeState(session: Session) -> RuntimeState {
-        RuntimeState(rawValue: runtime.runtimeState(session.rawValue)) ?? .inactive
+        metrics(session: session).runtimeState
     }
 
     func frameRate(session: Session) -> Double {
-        runtime.frameRate(session.rawValue)
+        metrics(session: session).frameRateHz
     }
 
     func lastError(session: Session) -> String? {
-        runtime.string(from: runtime.lastError(session.rawValue))
+        lastErrorRecord(session: session).message
     }
 
     func surfaceEvent(session: Session) -> String? {
         runtime.string(from: runtime.surfaceEvent(session.rawValue))
     }
 
-    private func ensureSuccess(_ result: Int32, session: Session, context: String) throws {
-        guard result == 0 else {
+    private func lastErrorRecord(session: Session) -> BridgeFailureRecord {
+        var error = Cinder64Error(code: 0, reserved: 0, message: nil)
+        guard runtime.getLastError(session.rawValue, &error) == BridgeStatus.ok.rawValue else {
+            return BridgeFailureRecord(status: .runtimeError, message: "Unknown gopher64 bridge error")
+        }
+
+        return BridgeFailureRecord(
+            status: BridgeStatus(rawValue: Int32(error.code)) ?? .runtimeError,
+            message: runtime.string(from: error.message)
+        )
+    }
+
+    private func ensureSuccess(_ status: Int32, session: Session, context: String) throws {
+        guard status == BridgeStatus.ok.rawValue else {
+            let failure = lastErrorRecord(session: session)
             throw Gopher64BridgeError.commandFailed(
                 context: context,
-                message: runtime.string(from: runtime.lastError(session.rawValue)) ?? "Unknown gopher64 bridge error"
+                status: failure.status,
+                message: failure.message ?? "Unknown gopher64 bridge error"
             )
         }
     }
 }
 
+private struct BridgeFailureRecord {
+    let status: BridgeStatus
+    let message: String?
+}
+
+enum BridgeStatus: Int32, Sendable {
+    case ok = 0
+    case invalidArgument = 1
+    case invalidState = 2
+    case runtimeError = 3
+    case notReady = 4
+    case timeout = 5
+    case panic = 6
+    case abiMismatch = 7
+
+    var description: String {
+        switch self {
+        case .ok:
+            "ok"
+        case .invalidArgument:
+            "invalid_argument"
+        case .invalidState:
+            "invalid_state"
+        case .runtimeError:
+            "runtime_error"
+        case .notReady:
+            "not_ready"
+        case .timeout:
+            "timeout"
+        case .panic:
+            "panic"
+        case .abiMismatch:
+            "abi_mismatch"
+        }
+    }
+}
+
 private struct LoadedRuntime {
+    typealias GetAPIFn = @convention(c) (UInt32, UInt32, UnsafeMutablePointer<Cinder64BridgeAPI>?) -> Int32
     typealias CreateSessionFn = @convention(c) () -> UnsafeMutableRawPointer?
     typealias DestroySessionFn = @convention(c) (UnsafeMutableRawPointer?) -> Void
-    typealias AttachSurfaceFn = @convention(c) (UnsafeMutableRawPointer?, UInt, UInt, Int32, Int32, Int32, Int32, Double, UInt64) -> Int32
-    typealias UpdateSurfaceFn = @convention(c) (UnsafeMutableRawPointer?, UInt, UInt, Int32, Int32, Int32, Int32, Double, UInt64) -> Int32
-    typealias OpenROMFn = @convention(c) (
-        UnsafeMutableRawPointer?,
-        UnsafePointer<CChar>?,
-        UnsafePointer<CChar>?,
-        UnsafePointer<CChar>?,
-        UnsafePointer<CChar>?,
-        UnsafePointer<CChar>?,
-        Int32,
-        Int32,
-        Int32,
-        Int32,
-        Int32,
-        Int32
-    ) -> Int32
+    typealias AttachSurfaceFn = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<Cinder64SurfaceDescriptor>?) -> Int32
+    typealias UpdateSurfaceFn = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<Cinder64SurfaceDescriptor>?) -> Int32
+    typealias OpenROMFn = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<Cinder64OpenROMRequest>?) -> Int32
     typealias PauseFn = @convention(c) (UnsafeMutableRawPointer?) -> Int32
     typealias ResumeFn = @convention(c) (UnsafeMutableRawPointer?) -> Int32
     typealias ResetFn = @convention(c) (UnsafeMutableRawPointer?) -> Int32
     typealias SaveStateFn = @convention(c) (UnsafeMutableRawPointer?, Int32) -> Int32
     typealias LoadStateFn = @convention(c) (UnsafeMutableRawPointer?, Int32) -> Int32
-    typealias UpdateSettingsFn = @convention(c) (UnsafeMutableRawPointer?, Int32, Int32, Int32, Int32, Int32, Int32) -> Int32
+    typealias UpdateSettingsFn = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<Cinder64Settings>?) -> Int32
     typealias SetKeyboardKeyFn = @convention(c) (UnsafeMutableRawPointer?, Int32, Int32) -> Int32
     typealias StopFn = @convention(c) (UnsafeMutableRawPointer?) -> Int32
     typealias PumpEventsFn = @convention(c) (UnsafeMutableRawPointer?) -> Int32
-    typealias LastErrorFn = @convention(c) (UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
-    typealias SurfaceEventFn = @convention(c) (UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
+    typealias GetLastErrorFn = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<Cinder64Error>?) -> Int32
+    typealias GetMetricsFn = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<Cinder64Metrics>?) -> Int32
     typealias VersionFn = @convention(c) () -> UnsafePointer<CChar>?
     typealias RendererNameFn = @convention(c) (UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
-    typealias FrameRateFn = @convention(c) (UnsafeMutableRawPointer?) -> Double
-    typealias FrameCountFn = @convention(c) (UnsafeMutableRawPointer?) -> UInt64
-    typealias RuntimeStateFn = @convention(c) (UnsafeMutableRawPointer?) -> Int32
+    typealias SurfaceEventFn = @convention(c) (UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
 
     let handle: UnsafeMutableRawPointer
     let createSession: CreateSessionFn
@@ -276,13 +329,11 @@ private struct LoadedRuntime {
     let setKeyboardKey: SetKeyboardKeyFn
     let stop: StopFn
     let pumpEvents: PumpEventsFn
-    let lastError: LastErrorFn
-    let surfaceEvent: SurfaceEventFn
+    let getLastError: GetLastErrorFn
+    let getMetrics: GetMetricsFn
     let version: VersionFn
     let rendererName: RendererNameFn
-    let frameRate: FrameRateFn
-    let frameCount: FrameCountFn
-    let runtimeState: RuntimeStateFn
+    let surfaceEvent: SurfaceEventFn
 
     init(libraryURL: URL) throws {
         guard let handle = dlopen(libraryURL.path, RTLD_NOW) else {
@@ -292,32 +343,91 @@ private struct LoadedRuntime {
             )
         }
 
+        let getAPI = try Self.loadSymbol(from: handle, named: "cinder64_bridge_get_api", as: GetAPIFn.self)
+        var api = Cinder64BridgeAPI()
+        let requestedVersion = UInt32(CINDER64_BRIDGE_ABI_VERSION)
+        let status = withUnsafeMutablePointer(to: &api) {
+            getAPI(requestedVersion, UInt32(MemoryLayout<Cinder64BridgeAPI>.size), $0)
+        }
+
+        guard status == BridgeStatus.ok.rawValue else {
+            dlclose(handle)
+            throw Gopher64BridgeError.abiPreflightFailed(
+                "The bundled gopher64 bridge rejected ABI version \(requestedVersion) with status \(status)."
+            )
+        }
+
+        guard api.abi_version == requestedVersion else {
+            dlclose(handle)
+            throw Gopher64BridgeError.abiPreflightFailed(
+                "The bundled gopher64 bridge returned ABI version \(api.abi_version), expected \(requestedVersion)."
+            )
+        }
+
+        guard api.struct_size == UInt32(MemoryLayout<Cinder64BridgeAPI>.size) else {
+            dlclose(handle)
+            throw Gopher64BridgeError.abiPreflightFailed("The bundled gopher64 bridge reported an unexpected API table size.")
+        }
+
+        guard api.surface_descriptor_size == UInt32(MemoryLayout<Cinder64SurfaceDescriptor>.size),
+              api.settings_size == UInt32(MemoryLayout<Cinder64Settings>.size),
+              api.open_rom_request_size == UInt32(MemoryLayout<Cinder64OpenROMRequest>.size),
+              api.metrics_size == UInt32(MemoryLayout<Cinder64Metrics>.size),
+              api.error_size == UInt32(MemoryLayout<Cinder64Error>.size) else {
+            dlclose(handle)
+            throw Gopher64BridgeError.abiPreflightFailed("The bundled gopher64 bridge reported incompatible struct sizes.")
+        }
+
         self.handle = handle
-        self.createSession = try Self.loadSymbol(from: handle, named: "cinder64_bridge_create_session", as: CreateSessionFn.self)
-        self.destroySession = try Self.loadSymbol(from: handle, named: "cinder64_bridge_destroy_session", as: DestroySessionFn.self)
-        self.attachSurface = try Self.loadSymbol(from: handle, named: "cinder64_bridge_attach_surface", as: AttachSurfaceFn.self)
-        self.updateSurface = try Self.loadSymbol(from: handle, named: "cinder64_bridge_update_surface", as: UpdateSurfaceFn.self)
-        self.openROM = try Self.loadSymbol(from: handle, named: "cinder64_bridge_open_rom", as: OpenROMFn.self)
-        self.pause = try Self.loadSymbol(from: handle, named: "cinder64_bridge_pause", as: PauseFn.self)
-        self.resume = try Self.loadSymbol(from: handle, named: "cinder64_bridge_resume", as: ResumeFn.self)
-        self.reset = try Self.loadSymbol(from: handle, named: "cinder64_bridge_reset", as: ResetFn.self)
-        self.saveState = try Self.loadSymbol(from: handle, named: "cinder64_bridge_save_state", as: SaveStateFn.self)
-        self.loadState = try Self.loadSymbol(from: handle, named: "cinder64_bridge_load_state", as: LoadStateFn.self)
-        self.updateSettings = try Self.loadSymbol(from: handle, named: "cinder64_bridge_update_settings", as: UpdateSettingsFn.self)
-        self.setKeyboardKey = try Self.loadSymbol(from: handle, named: "cinder64_bridge_set_keyboard_key", as: SetKeyboardKeyFn.self)
-        self.stop = try Self.loadSymbol(from: handle, named: "cinder64_bridge_stop", as: StopFn.self)
-        self.pumpEvents = try Self.loadSymbol(from: handle, named: "cinder64_bridge_pump_events", as: PumpEventsFn.self)
-        self.lastError = try Self.loadSymbol(from: handle, named: "cinder64_bridge_last_error", as: LastErrorFn.self)
-        self.surfaceEvent = try Self.loadSymbol(from: handle, named: "cinder64_bridge_surface_event", as: SurfaceEventFn.self)
-        self.version = try Self.loadSymbol(from: handle, named: "cinder64_bridge_version", as: VersionFn.self)
-        self.rendererName = try Self.loadSymbol(from: handle, named: "cinder64_bridge_renderer_name", as: RendererNameFn.self)
-        self.frameRate = try Self.loadSymbol(from: handle, named: "cinder64_bridge_frame_rate", as: FrameRateFn.self)
-        self.frameCount = try Self.loadSymbol(from: handle, named: "cinder64_bridge_frame_count", as: FrameCountFn.self)
-        self.runtimeState = try Self.loadSymbol(from: handle, named: "cinder64_bridge_runtime_state", as: RuntimeStateFn.self)
+        self.createSession = Self.castFunction(api.create_session, named: "create_session")
+        self.destroySession = Self.castFunction(api.destroy_session, named: "destroy_session")
+        self.attachSurface = Self.castFunction(api.attach_surface, named: "attach_surface")
+        self.updateSurface = Self.castFunction(api.update_surface, named: "update_surface")
+        self.openROM = Self.castFunction(api.open_rom, named: "open_rom")
+        self.pause = Self.castFunction(api.pause, named: "pause")
+        self.resume = Self.castFunction(api.resume, named: "resume")
+        self.reset = Self.castFunction(api.reset, named: "reset")
+        self.saveState = Self.castFunction(api.save_state, named: "save_state")
+        self.loadState = Self.castFunction(api.load_state, named: "load_state")
+        self.updateSettings = Self.castFunction(api.update_settings, named: "update_settings")
+        self.setKeyboardKey = Self.castFunction(api.set_keyboard_key, named: "set_keyboard_key")
+        self.stop = Self.castFunction(api.stop, named: "stop")
+        self.pumpEvents = Self.castFunction(api.pump_events, named: "pump_events")
+        self.getLastError = Self.castFunction(api.get_last_error, named: "get_last_error")
+        self.getMetrics = Self.castFunction(api.get_metrics, named: "get_metrics")
+        self.version = Self.castFunction(api.version, named: "version")
+        self.rendererName = Self.castFunction(api.renderer_name, named: "renderer_name")
+        self.surfaceEvent = Self.castFunction(api.surface_event, named: "surface_event")
     }
 
     func string(from value: UnsafePointer<CChar>?) -> String? {
         value.map { String(cString: $0) }
+    }
+
+    func surfaceDescriptor(from descriptor: RenderSurfaceDescriptor) -> Cinder64SurfaceDescriptor {
+        Cinder64SurfaceDescriptor(
+            surface_id: descriptor.surfaceID,
+            generation: descriptor.generation,
+            window_handle: descriptor.windowHandle,
+            view_handle: descriptor.viewHandle,
+            logical_width: Int32(descriptor.logicalWidth),
+            logical_height: Int32(descriptor.logicalHeight),
+            pixel_width: Int32(descriptor.pixelWidth),
+            pixel_height: Int32(descriptor.pixelHeight),
+            backing_scale_factor: descriptor.backingScaleFactor,
+            revision: descriptor.revision
+        )
+    }
+
+    func settings(from settings: CoreUserSettings) -> Cinder64Settings {
+        Cinder64Settings(
+            fullscreen: settings.startFullscreen ? 1 : 0,
+            mute_audio: settings.muteAudio ? 1 : 0,
+            speed_percent: Int32(settings.speedPercent),
+            upscale_multiplier: Int32(settings.upscaleMultiplier),
+            integer_scaling: settings.integerScaling ? 1 : 0,
+            crt_filter: settings.crtFilterEnabled ? 1 : 0
+        )
     }
 
     private static func loadSymbol<T>(from handle: UnsafeMutableRawPointer, named name: String, as _: T.Type) throws -> T {
@@ -328,24 +438,34 @@ private struct LoadedRuntime {
 
         return unsafeBitCast(symbol, to: T.self)
     }
+
+    private static func castFunction<T>(_ address: UInt, named name: String) -> T {
+        guard address != 0 else {
+            fatalError("Missing bridge function pointer for \(name)")
+        }
+        return unsafeBitCast(address, to: T.self)
+    }
 }
 
 enum Gopher64BridgeError: LocalizedError {
     case dynamicLoadingFailed(path: String, message: String)
+    case abiPreflightFailed(String)
     case runtimeInitializationFailed(String)
     case invalidRenderSurface
-    case commandFailed(context: String, message: String)
+    case commandFailed(context: String, status: BridgeStatus, message: String)
 
     var errorDescription: String? {
         switch self {
         case let .dynamicLoadingFailed(path, message):
             "Could not load the gopher64 bridge at \(path): \(message)"
+        case let .abiPreflightFailed(message):
+            message
         case let .runtimeInitializationFailed(message):
             message
         case .invalidRenderSurface:
             "Cinder64 does not have a valid render surface attached yet."
-        case let .commandFailed(context, message):
-            "The gopher64 bridge failed while \(context): \(message)"
+        case let .commandFailed(context, status, message):
+            "The gopher64 bridge failed while \(context) [\(status.description)]: \(message)"
         }
     }
 }

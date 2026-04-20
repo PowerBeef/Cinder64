@@ -58,6 +58,7 @@ APP_BUNDLE="$(cinder64_prepare_run_bundle_directory "$RUN_ID")"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_FRAMEWORKS="$APP_CONTENTS/Frameworks"
+APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 
@@ -125,6 +126,80 @@ verify_bundle_signatures() {
   codesign --verify --deep --verbose=2 "$APP_BUNDLE" >&2
 }
 
+emit_build_manifest() {
+  local manifest_path="$APP_RESOURCES/build-manifest.json"
+  local resolved_moltenvk_library="${1:-}"
+  local bridge_version
+  local swift_version
+  local rust_version
+  local upstream_commit
+  local moltenvk_identity
+  local dylib_listing
+
+  bridge_version="$(strings "$APP_FRAMEWORKS/libcinder64_gopher64.dylib" | grep -m1 '^gopher64-cinder64-bridge ' || true)"
+  swift_version="$(swift --version 2>/dev/null | head -n1 | tr -d '\n')"
+  rust_version="$(rustc --version 2>/dev/null | tr -d '\n')"
+  upstream_commit="$(tr -d '\n' < "$ROOT_DIR/ThirdParty/gopher64/UPSTREAM_COMMIT.txt" 2>/dev/null || true)"
+  moltenvk_identity=""
+  if [[ -f "$APP_FRAMEWORKS/libMoltenVK.dylib" ]]; then
+    moltenvk_identity="$(/usr/bin/otool -D "$APP_FRAMEWORKS/libMoltenVK.dylib" 2>/dev/null | tail -n +2 | head -n1 | tr -d '\n')"
+  fi
+  dylib_listing="$(find "$APP_FRAMEWORKS" -maxdepth 1 -type f -name '*.dylib' -print | sort)"
+
+  APP_BUNDLE_JSON="$APP_BUNDLE" \
+  BRIDGE_VERSION_JSON="$bridge_version" \
+  GOPHER64_COMMIT_JSON="$upstream_commit" \
+  SWIFT_VERSION_JSON="$swift_version" \
+  RUST_VERSION_JSON="$rust_version" \
+  MOLTENVK_PATH_JSON="$resolved_moltenvk_library" \
+  MOLTENVK_IDENTITY_JSON="$moltenvk_identity" \
+  DYLIB_LISTING_JSON="$dylib_listing" \
+  MANIFEST_PATH_JSON="$manifest_path" \
+  python3 <<'PY'
+import json
+import os
+import subprocess
+from pathlib import Path
+
+def dylib_identity(path: Path) -> dict:
+    install_name = ""
+    try:
+        output = subprocess.run(
+            ["/usr/bin/otool", "-D", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.splitlines()
+        if len(output) > 1:
+            install_name = output[1].strip()
+    except Exception:
+        install_name = ""
+    return {
+        "path": str(path),
+        "name": path.name,
+        "install_name": install_name,
+    }
+
+paths = [Path(line) for line in os.environ.get("DYLIB_LISTING_JSON", "").splitlines() if line.strip()]
+manifest = {
+    "app_bundle_path": os.environ.get("APP_BUNDLE_JSON", ""),
+    "bridge_version": os.environ.get("BRIDGE_VERSION_JSON", ""),
+    "vendored_gopher64_commit": os.environ.get("GOPHER64_COMMIT_JSON", ""),
+    "swift_toolchain_version": os.environ.get("SWIFT_VERSION_JSON", ""),
+    "rust_toolchain_version": os.environ.get("RUST_VERSION_JSON", ""),
+    "moltenvk": {
+        "resolved_path": os.environ.get("MOLTENVK_PATH_JSON", ""),
+        "install_name": os.environ.get("MOLTENVK_IDENTITY_JSON", ""),
+    },
+    "bundled_dylibs": [dylib_identity(path) for path in paths],
+}
+
+manifest_path = Path(os.environ["MANIFEST_PATH_JSON"])
+manifest_path.parent.mkdir(parents=True, exist_ok=True)
+manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+PY
+}
+
 prepare_bundle() {
   local bridge_library
   local moltenvk_library
@@ -140,7 +215,7 @@ prepare_bundle() {
   swift build >&2
   build_binary="$(swift build --show-bin-path)/$APP_NAME"
 
-  mkdir -p "$APP_MACOS" "$APP_FRAMEWORKS"
+  mkdir -p "$APP_MACOS" "$APP_FRAMEWORKS" "$APP_RESOURCES"
   cp "$build_binary" "$APP_BINARY"
   cp "$bridge_library" "$APP_FRAMEWORKS/libcinder64_gopher64.dylib"
   chmod +x "$APP_BINARY"
@@ -201,6 +276,7 @@ PLIST
   adhoc_sign_if_present "$APP_BINARY"
   adhoc_sign_if_present "$APP_BUNDLE"
   verify_bundle_signatures
+  emit_build_manifest "$moltenvk_library"
   cinder64_update_latest_bundle_symlink "$APP_BUNDLE"
   cinder64_prune_run_bundles "$KEEP_RUN_BUNDLES" "$APP_BUNDLE"
 }

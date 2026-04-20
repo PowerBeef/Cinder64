@@ -13,6 +13,7 @@ ROM_PATH="${1:-$DEFAULT_ROM}"
 VERIFY_ROOT="${2:-$(mktemp -d "${TMPDIR:-/tmp}/cinder64-fullboot.XXXXXX")}"
 APP_SUPPORT_ROOT="$VERIFY_ROOT/app-support"
 RUNTIME_LOG_FILE="$APP_SUPPORT_ROOT/logs/runtime.log"
+METRICS_FILE="$APP_SUPPORT_ROOT/metrics.json"
 RECENT_GAMES_FILE="$APP_SUPPORT_ROOT/recent-games.json"
 CRASH_REPORT_DIR="$HOME/Library/Logs/DiagnosticReports"
 READY_LINE="Opened Super Mario 64 (USA) using"
@@ -47,13 +48,14 @@ cleanup() {
 
 trap cleanup EXIT
 
+rm -rf "$APP_SUPPORT_ROOT"
 mkdir -p "$APP_SUPPORT_ROOT"
 cinder64_capture_crash_snapshot "$BEFORE_CRASHES" "$CRASH_REPORT_DIR"
 
-/usr/bin/open -n -a "$APP_BUNDLE" --args \
-  "$ROM_PATH" \
-  --app-support-root "$APP_SUPPORT_ROOT" \
-  --scripted-keys "$SCRIPTED_KEYS"
+env \
+  CINDER64_APP_SUPPORT_ROOT="$APP_SUPPORT_ROOT" \
+  CINDER64_SCRIPTED_KEYS="$SCRIPTED_KEYS" \
+  /usr/bin/open -n -a "$APP_BUNDLE" "$ROM_PATH"
 
 if ! LAUNCHED_PID="$(cinder64_wait_for_pid_for_bundle "$APP_BUNDLE" 120)"; then
   echo "Timed out waiting for the launched $APP_NAME process." >&2
@@ -119,24 +121,30 @@ if grep -Fq "setKeyboardKey failed" "$RUNTIME_LOG_FILE"; then
   exit 1
 fi
 
-FRAME_COUNTS="$(grep -E 'frame_count=[0-9]+' "$RUNTIME_LOG_FILE" | sed -E 's/.*frame_count=([0-9]+).*/\1/')"
-if [[ -z "$FRAME_COUNTS" ]]; then
-  echo "No frame_count telemetry was logged by the bridge." >&2
+if [[ ! -f "$METRICS_FILE" ]]; then
+  echo "No metrics.json artifact was written during boot." >&2
   exit 1
 fi
 
-FIRST_FRAME="$(printf '%s\n' "$FRAME_COUNTS" | head -n1)"
-LAST_FRAME="$(printf '%s\n' "$FRAME_COUNTS" | tail -n1)"
-SAMPLE_COUNT="$(printf '%s\n' "$FRAME_COUNTS" | wc -l | tr -d ' ')"
+read -r RENDER_FRAME_COUNT PRESENT_COUNT VI_COUNT PUMP_TICK_COUNT < <(
+  python3 - "$METRICS_FILE" <<'PY'
+import json
+import sys
 
-if ! printf '%s\n' "$FRAME_COUNTS" | awk 'NR==1{p=$1; next} $1 <= p {exit 1} {p=$1}'; then
-  echo "Frame counter did not advance monotonically:" >&2
-  printf '%s\n' "$FRAME_COUNTS" >&2
-  exit 1
-fi
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    metrics = json.load(handle)
 
-if (( SAMPLE_COUNT < 8 || LAST_FRAME - FIRST_FRAME < 600 )); then
-  echo "Frame counter did not advance far enough: first=$FIRST_FRAME last=$LAST_FRAME samples=$SAMPLE_COUNT." >&2
+print(
+    metrics.get("renderFrameCount", 0),
+    metrics.get("presentCount", 0),
+    metrics.get("viCount", 0),
+    metrics.get("pumpTickCount", 0),
+)
+PY
+)
+
+if (( RENDER_FRAME_COUNT < 250 || PRESENT_COUNT < 250 || VI_COUNT < 700 )); then
+  echo "Structured metrics did not advance far enough: render=$RENDER_FRAME_COUNT present=$PRESENT_COUNT vi=$VI_COUNT pump=$PUMP_TICK_COUNT." >&2
   exit 1
 fi
 
@@ -159,7 +167,8 @@ echo "launched_pid=$LAUNCHED_PID"
 echo "rom_path=$ROM_PATH"
 echo "app_support_root=$APP_SUPPORT_ROOT"
 echo "key_profile=$KEY_PROFILE_NAME"
-echo "frame_count_first=$FIRST_FRAME"
-echo "frame_count_last=$LAST_FRAME"
-echo "frame_count_samples=$SAMPLE_COUNT"
+echo "render_frame_count=$RENDER_FRAME_COUNT"
+echo "present_count=$PRESENT_COUNT"
+echo "vi_count=$VI_COUNT"
+echo "pump_tick_count=$PUMP_TICK_COUNT"
 echo "runtime_log=$RUNTIME_LOG_FILE"

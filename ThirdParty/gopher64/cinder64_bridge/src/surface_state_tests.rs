@@ -10,6 +10,8 @@ use crate::{
 use std::time::{Duration, Instant};
 
 fn make_surface(
+    surface_id: u64,
+    generation: u64,
     window_handle: usize,
     view_handle: usize,
     logical_width: i32,
@@ -20,6 +22,8 @@ fn make_surface(
     revision: u64,
 ) -> HostSurfaceDescriptor {
     HostSurfaceDescriptor {
+        surface_id,
+        generation,
         window_handle,
         view_handle,
         logical_width,
@@ -33,7 +37,7 @@ fn make_surface(
 
 #[test]
 fn initial_surface_requires_attach() {
-    let incoming = make_surface(0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 1);
+    let incoming = make_surface(1, 1, 0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 1);
 
     let action = determine_surface_apply_action(None, &incoming);
 
@@ -42,8 +46,8 @@ fn initial_surface_requires_attach() {
 
 #[test]
 fn identical_revision_is_a_no_op() {
-    let applied = make_surface(0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
-    let incoming = make_surface(0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
+    let applied = make_surface(1, 1, 0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
+    let incoming = make_surface(1, 1, 0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
 
     let action = determine_surface_apply_action(Some(&applied), &incoming);
 
@@ -52,8 +56,8 @@ fn identical_revision_is_a_no_op() {
 
 #[test]
 fn pixel_size_change_is_a_resize() {
-    let applied = make_surface(0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
-    let incoming = make_surface(0xCAFE, 0xBEEF, 700, 500, 1400, 1000, 2.0, 4);
+    let applied = make_surface(1, 1, 0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
+    let incoming = make_surface(1, 1, 0xCAFE, 0xBEEF, 700, 500, 1400, 1000, 2.0, 4);
 
     let action = determine_surface_apply_action(Some(&applied), &incoming);
 
@@ -62,8 +66,8 @@ fn pixel_size_change_is_a_resize() {
 
 #[test]
 fn handle_change_requires_reattach() {
-    let applied = make_surface(0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
-    let incoming = make_surface(0xFACE, 0xD00D, 640, 480, 1280, 960, 2.0, 4);
+    let applied = make_surface(1, 1, 0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
+    let incoming = make_surface(1, 2, 0xFACE, 0xD00D, 640, 480, 1280, 960, 2.0, 4);
 
     let action = determine_surface_apply_action(Some(&applied), &incoming);
 
@@ -72,8 +76,8 @@ fn handle_change_requires_reattach() {
 
 #[test]
 fn scale_change_still_uses_resize() {
-    let applied = make_surface(0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
-    let incoming = make_surface(0xCAFE, 0xBEEF, 640, 480, 1920, 1440, 3.0, 4);
+    let applied = make_surface(1, 1, 0xCAFE, 0xBEEF, 640, 480, 1280, 960, 2.0, 3);
+    let incoming = make_surface(1, 1, 0xCAFE, 0xBEEF, 640, 480, 1920, 1440, 3.0, 4);
 
     let action = determine_surface_apply_action(Some(&applied), &incoming);
 
@@ -82,7 +86,7 @@ fn scale_change_still_uses_resize() {
 
 #[test]
 fn invalid_descriptor_is_rejected_cleanly() {
-    let invalid = make_surface(0, 0, 0, 0, 0, 0, 0.0, 0);
+    let invalid = make_surface(0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0);
 
     assert!(!invalid.is_valid());
 }
@@ -111,4 +115,7 @@ fn measured_frame_rate_updates_after_a_one_second_sample_window() {
 
     assert_eq!(frame_rate, Some(58.0));
     assert_eq!(session.frame_rate, 58.0);
+    assert_eq!(session.render_frame_count, 58);
+    assert_eq!(session.present_count, 58);
+    assert_eq!(session.vi_count, 60);
 }

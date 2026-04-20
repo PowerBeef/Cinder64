@@ -297,8 +297,8 @@ struct EmulationSessionTests {
         await Task.yield()
 
         #expect(core.events.suffix(2) == [
-            .setKeyboardKey(40, true),
-            .setKeyboardKey(40, false),
+            .enqueueKeyboardEvent(EmbeddedKeyboardEvent(scancode: 40, isPressed: true)),
+            .enqueueKeyboardEvent(EmbeddedKeyboardEvent(scancode: 40, isPressed: false)),
         ])
     }
 
@@ -430,8 +430,73 @@ struct EmulationSessionTests {
 
         await Task.yield()
 
-        #expect(core.events.contains(.setKeyboardKey(40, true)) == false)
+        #expect(core.events.contains(.enqueueKeyboardEvent(EmbeddedKeyboardEvent(scancode: 40, isPressed: true))) == false)
         #expect(try String(contentsOf: logURL, encoding: .utf8).contains("keyboard input ignored: emulationState=failed"))
+    }
+
+    @Test func releasingKeyboardInputForwardsAReleaseAllRequestToTheCoreHost() async throws {
+        let harness = try TemporaryDirectoryHarness()
+        let persistence = PersistenceStore(
+            recentGamesStore: RecentGamesStore(storageURL: harness.directory.appending(path: "recent.json")),
+            saveStateStore: SaveStateMetadataStore(storageURL: harness.directory.appending(path: "savestates.json"))
+        )
+        let core = FakeCoreHost()
+        let session = EmulationSession(coreHost: core, persistenceStore: persistence)
+        let romURL = harness.directory.appending(path: "Wave Race 64.z64")
+        try Data("rom-data".utf8).write(to: romURL)
+        session.updateRenderSurface(
+            RenderSurfaceDescriptor(
+                windowHandle: 0xABCDABCD,
+                viewHandle: 0xFACADE,
+                width: 1280,
+                height: 720,
+                backingScaleFactor: 2
+            )
+        )
+
+        try await session.openROM(url: romURL)
+        session.releaseKeyboardInput()
+
+        await Task.yield()
+
+        #expect(core.events.suffix(1) == [.releaseKeyboardInput])
+    }
+
+    @Test func runtimePumpsAreSerializedWhileAPumpIsAlreadyInFlight() async throws {
+        let harness = try TemporaryDirectoryHarness()
+        let persistence = PersistenceStore(
+            recentGamesStore: RecentGamesStore(storageURL: harness.directory.appending(path: "recent.json")),
+            saveStateStore: SaveStateMetadataStore(storageURL: harness.directory.appending(path: "savestates.json"))
+        )
+        let core = FakeCoreHost()
+        core.pumpBehavior = .waitForRelease
+        let session = EmulationSession(coreHost: core, persistenceStore: persistence)
+        let romURL = harness.directory.appending(path: "F-Zero X.z64")
+        try Data("rom-data".utf8).write(to: romURL)
+        session.updateRenderSurface(
+            RenderSurfaceDescriptor(
+                windowHandle: 0xABCDABCD,
+                viewHandle: 0xFACADE,
+                width: 1280,
+                height: 720,
+                backingScaleFactor: 2
+            )
+        )
+
+        try await session.openROM(url: romURL)
+        session.pumpRuntimeEvents()
+        session.pumpRuntimeEvents()
+
+        await Task.yield()
+
+        #expect(core.pumpRequestCount == 1)
+
+        core.releasePump()
+        await Task.yield()
+        session.pumpRuntimeEvents()
+        await Task.yield()
+
+        #expect(core.pumpRequestCount == 2)
     }
 
     @Test func stoppingAnActiveSessionReturnsToTheLauncherShellWithoutDisposingTheCoreHost() async throws {
@@ -486,12 +551,18 @@ private final class FakeCoreHost: CoreHosting {
         case waitForRelease
     }
 
+    enum PumpBehavior {
+        case immediate
+        case waitForRelease
+    }
+
     enum Event: Equatable {
         case openROM(URL)
         case resume
         case setSaveSlot(Int)
         case saveState
-        case setKeyboardKey(Int32, Bool)
+        case enqueueKeyboardEvent(EmbeddedKeyboardEvent)
+        case releaseKeyboardInput
         case stop
         case dispose
     }
@@ -500,11 +571,14 @@ private final class FakeCoreHost: CoreHosting {
     var openConfigurations: [CoreHostConfiguration] = []
     var surfaceUpdates: [RenderSurfaceDescriptor] = []
     var resumeBehavior: ResumeBehavior = .immediate
+    var pumpBehavior: PumpBehavior = .immediate
     var nextPumpEvent: CoreRuntimeEvent?
     var updateRenderSurfaceError: Error?
     private(set) var resumeRequestCount = 0
+    private(set) var pumpRequestCount = 0
     private(set) var lastROMIdentity: ROMIdentity?
     private var pendingResumeContinuation: CheckedContinuation<Void, Never>?
+    private var pendingPumpContinuation: CheckedContinuation<Void, Never>?
 
     func openROM(at url: URL, configuration: CoreHostConfiguration) async throws -> SessionSnapshot {
         let identity = try ROMIdentity.make(for: url)
@@ -530,7 +604,15 @@ private final class FakeCoreHost: CoreHosting {
         surfaceUpdates.append(descriptor)
     }
 
-    func pumpEvents() -> CoreRuntimeEvent? {
+    func pumpEvents() async -> CoreRuntimeEvent? {
+        pumpRequestCount += 1
+
+        if pumpBehavior == .waitForRelease {
+            await withCheckedContinuation { continuation in
+                pendingPumpContinuation = continuation
+            }
+        }
+
         defer { nextPumpEvent = nil }
         return nextPumpEvent
     }
@@ -579,8 +661,12 @@ private final class FakeCoreHost: CoreHosting {
 
     func updateInputMapping(_ mapping: InputMappingProfile) async throws {}
 
-    func setKeyboardKey(scancode: Int32, pressed: Bool) async throws {
-        events.append(.setKeyboardKey(scancode, pressed))
+    func enqueueKeyboardInput(_ event: EmbeddedKeyboardEvent) async throws {
+        events.append(.enqueueKeyboardEvent(event))
+    }
+
+    func releaseKeyboardInput() async throws {
+        events.append(.releaseKeyboardInput)
     }
 
     func stop() async throws {
@@ -594,5 +680,10 @@ private final class FakeCoreHost: CoreHosting {
     func releaseResume() {
         pendingResumeContinuation?.resume()
         pendingResumeContinuation = nil
+    }
+
+    func releasePump() {
+        pendingPumpContinuation?.resume()
+        pendingPumpContinuation = nil
     }
 }

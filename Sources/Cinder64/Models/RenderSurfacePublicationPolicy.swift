@@ -30,11 +30,11 @@ enum RenderSurfacePublicationPolicy {
             return .noChange
         }
 
-        if isLiveResize && proposed.matchesHandles(of: previousCommitted) {
+        if isLiveResize && proposed.matchesSurfaceIdentity(of: previousCommitted) {
             return .defer(proposed)
         }
 
-        if proposed.matchesHandles(of: previousCommitted) {
+        if proposed.matchesSurfaceIdentity(of: previousCommitted) {
             return .publish(proposed, kind: .resize)
         }
 
