@@ -14,6 +14,7 @@ final class Gopher64CoreHost: CoreHosting {
     private var currentSnapshot = SessionSnapshot.idle
     private var lastLoggedFrameCount: UInt64 = 0
     private var lastFrameLogAt: Date?
+    private var heldKeyboardScancodes: Set<Int32> = []
 
     init(
         logStore: LogStore,
@@ -69,7 +70,7 @@ final class Gopher64CoreHost: CoreHosting {
         }
     }
 
-    func pumpEvents() -> CoreRuntimeEvent? {
+    func pumpEvents() async -> CoreRuntimeEvent? {
         let interval = Self.signposter.beginInterval("Pump Drain")
         defer { Self.signposter.endInterval("Pump Drain", interval) }
         let event = executor.pumpEvents()
@@ -188,8 +189,38 @@ final class Gopher64CoreHost: CoreHosting {
         logStore.record("info", "Using input mapping profile: \(mapping.profileName)")
     }
 
-    func setKeyboardKey(scancode: Int32, pressed: Bool) async throws {
-        try executor.setKeyboardKey(scancode: scancode, pressed: pressed)
+    func enqueueKeyboardInput(_ event: EmbeddedKeyboardEvent) async throws {
+        try executor.setKeyboardKey(scancode: event.scancode, pressed: event.isPressed)
+        if event.isPressed {
+            heldKeyboardScancodes.insert(event.scancode)
+        } else {
+            heldKeyboardScancodes.remove(event.scancode)
+        }
+    }
+
+    func releaseKeyboardInput() async throws {
+        guard heldKeyboardScancodes.isEmpty == false else { return }
+
+        // Release every held key so the embedded runtime doesn't see them as
+        // still-pressed after focus leaves the surface. Continue on individual
+        // failures so one stuck key can't block the rest.
+        var firstError: Error?
+        for scancode in heldKeyboardScancodes {
+            do {
+                try executor.setKeyboardKey(scancode: scancode, pressed: false)
+            } catch {
+                firstError = firstError ?? error
+                logStore.record(
+                    "warning",
+                    "releaseKeyboardInput failed for scancode=\(scancode): \(error.localizedDescription)"
+                )
+            }
+        }
+        heldKeyboardScancodes.removeAll()
+
+        if let firstError {
+            throw firstError
+        }
     }
 
     func stop() async throws {
@@ -199,6 +230,7 @@ final class Gopher64CoreHost: CoreHosting {
             try await executor.stop()
             recordShutdownPhase("stopped")
             currentSnapshot = .idle
+            heldKeyboardScancodes.removeAll()
             recordMetricsIfAvailable()
             Self.signposter.endInterval("Stop", interval)
         } catch {
@@ -215,6 +247,7 @@ final class Gopher64CoreHost: CoreHosting {
             try await executor.dispose()
             recordShutdownPhase("disposed")
             currentSnapshot = .idle
+            heldKeyboardScancodes.removeAll()
             recordMetricsIfAvailable()
             Self.signposter.endInterval("Dispose", interval)
         } catch {

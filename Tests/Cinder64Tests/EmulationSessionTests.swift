@@ -206,6 +206,7 @@ struct EmulationSessionTests {
         core.nextPumpEvent = .frameRateUpdated(52.4)
 
         session.pumpRuntimeEvents()
+        await Task.yield()
 
         #expect(session.snapshot.fps == 52.4)
     }
@@ -345,6 +346,7 @@ struct EmulationSessionTests {
         core.nextPumpEvent = .runtimeTerminated("The embedded gopher64 runtime exited unexpectedly after boot.")
 
         session.pumpRuntimeEvents()
+        await Task.yield()
 
         #expect(session.snapshot.emulationState == .failed)
         #expect(session.snapshot.activeROM?.displayName == "Super Mario 64")

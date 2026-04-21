@@ -24,8 +24,10 @@ final class RuntimePumpCoordinator {
         self.pumpHandler = onPumpRequested
     }
 
-    deinit {
-        CVDisplayLinkStop(displayLink ?? .init(bitPattern: 0)!)
+    isolated deinit {
+        if let displayLink {
+            CVDisplayLinkStop(displayLink)
+        }
         fallbackTimer?.invalidate()
     }
 

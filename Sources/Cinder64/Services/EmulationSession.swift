@@ -14,6 +14,7 @@ final class EmulationSession {
     private(set) var renderSurface: RenderSurfaceDescriptor?
     private var deferredBootRenderSurface: RenderSurfaceDescriptor?
     private var pendingSurfaceWaiters: [UUID: CheckedContinuation<RenderSurfaceDescriptor, Never>]
+    private var isPumpInFlight = false
 
     init(
         coreHost: CoreHosting,
@@ -184,14 +185,37 @@ final class EmulationSession {
         }
 
         Task {
+            // Re-check once the task body actually runs — a pump task queued
+            // ahead of us may have marked the runtime as failed in the
+            // interim.
+            guard snapshot.emulationState == .running || snapshot.emulationState == .paused else {
+                persistenceStore.logStore.record(
+                    "info",
+                    "keyboard input ignored: emulationState=\(snapshot.emulationState.rawValue)"
+                )
+                return
+            }
             do {
-                try await coreHost.setKeyboardKey(scancode: event.scancode, pressed: event.isPressed)
+                try await coreHost.enqueueKeyboardInput(event)
             } catch {
                 persistenceStore.logStore.record(
                     "warning",
-                    "setKeyboardKey failed scancode=\(event.scancode) pressed=\(event.isPressed): \(error.localizedDescription)"
+                    "enqueueKeyboardInput failed scancode=\(event.scancode) pressed=\(event.isPressed): \(error.localizedDescription)"
                 )
                 markRuntimeFailure(message: error.localizedDescription)
+            }
+        }
+    }
+
+    func releaseKeyboardInput() {
+        Task {
+            do {
+                try await coreHost.releaseKeyboardInput()
+            } catch {
+                persistenceStore.logStore.record(
+                    "warning",
+                    "releaseKeyboardInput failed: \(error.localizedDescription)"
+                )
             }
         }
     }
@@ -245,13 +269,22 @@ final class EmulationSession {
 
     func pumpRuntimeEvents() {
         guard snapshot.activeROM != nil else { return }
+        // Drop overlapping pump ticks while an earlier pump is still awaiting
+        // the core host. Keeps concurrent pumps off the Rust bridge and
+        // matches the serialization contract the tests assert.
+        guard isPumpInFlight == false else { return }
+        isPumpInFlight = true
 
-        if let event = coreHost.pumpEvents() {
-            switch event {
-            case let .frameRateUpdated(frameRate):
-                snapshot.fps = frameRate
-            case let .runtimeTerminated(message):
-                markRuntimeFailure(message: message)
+        Task {
+            defer { isPumpInFlight = false }
+            let event = await coreHost.pumpEvents()
+            if let event {
+                switch event {
+                case let .frameRateUpdated(frameRate):
+                    snapshot.fps = frameRate
+                case let .runtimeTerminated(message):
+                    markRuntimeFailure(message: message)
+                }
             }
         }
     }

@@ -151,7 +151,7 @@ private final class CloseGameTestCoreHost: CoreHosting {
 
     func updateRenderSurface(_ descriptor: RenderSurfaceDescriptor) async throws {}
 
-    func pumpEvents() -> CoreRuntimeEvent? { nil }
+    func pumpEvents() async -> CoreRuntimeEvent? { nil }
 
     func pause() async throws {}
 
@@ -183,7 +183,9 @@ private final class CloseGameTestCoreHost: CoreHosting {
 
     func updateInputMapping(_ mapping: InputMappingProfile) async throws {}
 
-    func setKeyboardKey(scancode: Int32, pressed: Bool) async throws {}
+    func enqueueKeyboardInput(_ event: EmbeddedKeyboardEvent) async throws {}
+
+    func releaseKeyboardInput() async throws {}
 
     func stop() async throws {
         events.append(.stop)
