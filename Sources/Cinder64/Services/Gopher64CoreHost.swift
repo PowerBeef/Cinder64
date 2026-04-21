@@ -407,6 +407,14 @@ private final class Gopher64CoreExecutor {
 
         do {
             try await performBridgeStop(bridge: bridge, session: session)
+        } catch Gopher64CoreHostError.shutdownTimeout {
+            logStore.record(
+                "warning",
+                "gopher64 bridge dispose timed out; abandoning the session handle without calling destroy"
+            )
+            // Rust timed out first and leaked the emulation thread; do not touch
+            // a session struct the stuck thread may still be using.
+            return
         } catch {
             logStore.record(
                 "warning",
@@ -440,22 +448,51 @@ private final class Gopher64CoreExecutor {
 
     private func stopRuntimeIfNeeded() async throws {
         guard let bridge, let session else { return }
-        try await performBridgeStop(bridge: bridge, session: session)
+        do {
+            try await performBridgeStop(bridge: bridge, session: session)
+        } catch Gopher64CoreHostError.shutdownTimeout {
+            // The Rust runtime thread refused to join within its own timeout; the
+            // bridge handle can no longer be trusted. Drop our references and let
+            // the next ROM launch rebuild the bridge from scratch. Do not call
+            // bridge.destroy(session) — the abandoned emulation thread may still
+            // touch that session struct.
+            logStore.record(
+                "warning",
+                "gopher64 bridge stop timed out; dropping the bridge handle so the host can continue"
+            )
+            self.bridge = nil
+            self.session = nil
+        }
     }
+
+    private static let bridgeStopTimeout: Duration = .seconds(4)
 
     private func performBridgeStop(
         bridge: Gopher64Bridge,
         session: Gopher64Bridge.Session
     ) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    try bridge.stop(session: session)
-                    continuation.resume()
-                } catch {
-                    continuation.resume(throwing: error)
+        let timeout = Self.bridgeStopTimeout
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        do {
+                            try bridge.stop(session: session)
+                            continuation.resume()
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    }
                 }
             }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw Gopher64CoreHostError.shutdownTimeout
+            }
+
+            defer { group.cancelAll() }
+            // Wait for whichever task finishes first.
+            _ = try await group.next()
         }
     }
 
@@ -476,11 +513,14 @@ private final class Gopher64CoreExecutor {
 
 enum Gopher64CoreHostError: LocalizedError {
     case renderSurfaceUnavailable
+    case shutdownTimeout
 
     var errorDescription: String? {
         switch self {
         case .renderSurfaceUnavailable:
             "Cinder64 needs a live render surface before it can launch gopher64."
+        case .shutdownTimeout:
+            "The gopher64 runtime did not stop in time; its worker thread has been abandoned so the app can continue."
         }
     }
 }

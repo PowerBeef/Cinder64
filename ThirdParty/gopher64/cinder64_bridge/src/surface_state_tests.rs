@@ -1,12 +1,15 @@
 use crate::{
     BridgeSession,
     HostSurfaceDescriptor,
+    JoinOutcome,
     SDLWindowOwnership,
     SurfaceApplyAction,
     determine_surface_apply_action,
+    join_with_timeout,
     should_destroy_sdl_window_on_stop,
     update_measured_frame_rate,
 };
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 fn make_surface(
@@ -118,4 +121,51 @@ fn measured_frame_rate_updates_after_a_one_second_sample_window() {
     assert_eq!(session.render_frame_count, 58);
     assert_eq!(session.present_count, 58);
     assert_eq!(session.vi_count, 60);
+}
+
+#[test]
+fn join_with_timeout_reports_completed_when_thread_exits_in_time() {
+    let handle = std::thread::spawn(|| {});
+    assert_eq!(
+        join_with_timeout(handle, Duration::from_secs(1)),
+        JoinOutcome::Completed
+    );
+}
+
+#[test]
+fn join_with_timeout_reports_panicked_when_thread_panics() {
+    let handle = std::thread::spawn(|| {
+        // Panics intentionally to exercise the panic branch.
+        panic!("intentional test panic");
+    });
+    assert_eq!(
+        join_with_timeout(handle, Duration::from_secs(1)),
+        JoinOutcome::Panicked
+    );
+}
+
+#[test]
+fn join_with_timeout_reports_timeout_for_wedged_thread() {
+    let release = Arc::new(Barrier::new(2));
+    let release_worker = Arc::clone(&release);
+    let handle = std::thread::spawn(move || {
+        // Park here until the test unblocks us. This mirrors an emulation
+        // thread stuck in a blocking Vulkan present.
+        release_worker.wait();
+    });
+
+    let started_at = Instant::now();
+    let outcome = join_with_timeout(handle, Duration::from_millis(300));
+    let elapsed = started_at.elapsed();
+
+    assert_eq!(outcome, JoinOutcome::TimedOut);
+    // The join must not have spent much longer than the requested timeout.
+    assert!(
+        elapsed < Duration::from_millis(1_500),
+        "join_with_timeout took {:?} — expected to return close to the 300ms budget",
+        elapsed
+    );
+
+    // Unblock the leaked thread so it can exit cleanly after the test.
+    release.wait();
 }

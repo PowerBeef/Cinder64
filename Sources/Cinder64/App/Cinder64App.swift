@@ -195,7 +195,14 @@ struct Cinder64App: App {
                 mainWindowController.closeWindowAfterConfirmedClose()
             case .quitApp:
                 Task { @MainActor in
-                    try? await session.dispose()
+                    do {
+                        try await session.dispose()
+                    } catch {
+                        session.persistenceStore.logStore.record(
+                            "warning",
+                            "dispose during quit failed: \(error.localizedDescription)"
+                        )
+                    }
                     appDelegate.continueTerminationAfterConfirmedClose()
                 }
             }

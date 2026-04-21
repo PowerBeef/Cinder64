@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 const VERSION: &[u8] = b"gopher64-cinder64-bridge 0.2.0\0";
 const CINDER64_BRIDGE_ABI_VERSION: u32 = 1;
+const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 const STATUS_OK: i32 = 0;
 const STATUS_INVALID_ARGUMENT: i32 = 1;
@@ -706,6 +707,28 @@ fn spawn_runtime_thread(
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum JoinOutcome {
+    Completed,
+    Panicked,
+    TimedOut,
+}
+
+fn join_with_timeout(thread: JoinHandle<()>, timeout: Duration) -> JoinOutcome {
+    let (tx, rx) = mpsc::sync_channel::<std::thread::Result<()>>(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(thread.join());
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(())) => JoinOutcome::Completed,
+        Ok(Err(_)) => JoinOutcome::Panicked,
+        Err(mpsc::RecvTimeoutError::Timeout) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+            JoinOutcome::TimedOut
+        }
+    }
+}
+
 fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
     ui::video::set_hosted_mode(false);
     ui::video::reset_runtime_counters();
@@ -734,19 +757,42 @@ fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
         status.shutdown_requested = true;
     }
     ui::video::request_shutdown();
+
+    let mut shutdown_timed_out = false;
+    let mut panic_error: Option<String> = None;
+
     if let Some(thread) = session.emulation_thread.take() {
-        thread
-            .join()
-            .map_err(|_| "The embedded gopher64 runtime panicked while shutting down.".to_string())?;
+        match join_with_timeout(thread, SHUTDOWN_JOIN_TIMEOUT) {
+            JoinOutcome::Completed => {}
+            JoinOutcome::Panicked => {
+                panic_error =
+                    Some("The embedded gopher64 runtime panicked while shutting down.".to_string());
+            }
+            JoinOutcome::TimedOut => {
+                // The emulation thread is wedged (commonly on a blocking Vulkan
+                // present under MoltenVK). The JoinHandle and joiner helper are
+                // leaked rather than stalling the host — the process is on its
+                // way out.
+                shutdown_timed_out = true;
+            }
+        }
     }
 
-    let shutdown_error = session
-        .runtime_status
-        .lock()
-        .ok()
-        .and_then(|status| status.last_error.clone());
+    let shutdown_error = if shutdown_timed_out {
+        session
+            .runtime_status
+            .try_lock()
+            .ok()
+            .and_then(|status| status.last_error.clone())
+    } else {
+        session
+            .runtime_status
+            .lock()
+            .ok()
+            .and_then(|status| status.last_error.clone())
+    };
 
-    if should_destroy_window {
+    if should_destroy_window && !shutdown_timed_out {
         if let Some(window) = session.sdl_window.take() {
             ui::video::destroy_embedded_window(window.as_ptr());
         }
@@ -760,7 +806,15 @@ fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
     session.present_count = 0;
     session.pending_command_count = 0;
     session.last_metrics_sample_at = None;
-    if let Ok(mut status) = session.runtime_status.lock() {
+    if shutdown_timed_out {
+        if let Ok(mut status) = session.runtime_status.try_lock() {
+            status.active = false;
+            status.running = false;
+            status.paused = false;
+            status.shutdown_requested = false;
+            status.frame_rate = 0.0;
+        }
+    } else if let Ok(mut status) = session.runtime_status.lock() {
         status.active = false;
         status.running = false;
         status.paused = false;
@@ -768,6 +822,15 @@ fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
         status.frame_rate = 0.0;
     }
 
+    if let Some(message) = panic_error {
+        return Err(message);
+    }
+    if shutdown_timed_out {
+        return Err(format!(
+            "The embedded gopher64 runtime did not shut down within {} seconds; the runtime thread was abandoned so the host process can exit.",
+            SHUTDOWN_JOIN_TIMEOUT.as_secs()
+        ));
+    }
     if let Some(message) = shutdown_error {
         return Err(message);
     }
