@@ -9,9 +9,115 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const VERSION: &[u8] = b"gopher64-cinder64-bridge 0.2.0\0";
+const CINDER64_BRIDGE_ABI_VERSION: u32 = 1;
+
+const STATUS_OK: i32 = 0;
+const STATUS_INVALID_ARGUMENT: i32 = 1;
+#[allow(dead_code)]
+const STATUS_INVALID_STATE: i32 = 2;
+const STATUS_RUNTIME_ERROR: i32 = 3;
+#[allow(dead_code)]
+const STATUS_NOT_READY: i32 = 4;
+#[allow(dead_code)]
+const STATUS_TIMEOUT: i32 = 5;
+#[allow(dead_code)]
+const STATUS_PANIC: i32 = 6;
+const STATUS_ABI_MISMATCH: i32 = 7;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Cinder64Error {
+    code: u32,
+    reserved: u32,
+    message: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Cinder64Metrics {
+    pump_tick_count: u64,
+    vi_count: u64,
+    render_frame_count: u64,
+    present_count: u64,
+    frame_rate_hz: f64,
+    pending_command_count: u64,
+    runtime_state: i32,
+    reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Cinder64SurfaceDescriptor {
+    surface_id: u64,
+    generation: u64,
+    window_handle: usize,
+    view_handle: usize,
+    logical_width: i32,
+    logical_height: i32,
+    pixel_width: i32,
+    pixel_height: i32,
+    backing_scale_factor: f64,
+    revision: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Cinder64Settings {
+    fullscreen: i32,
+    mute_audio: i32,
+    speed_percent: i32,
+    upscale_multiplier: i32,
+    integer_scaling: i32,
+    crt_filter: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Cinder64OpenRomRequest {
+    rom_path: *const c_char,
+    config_dir: *const c_char,
+    data_dir: *const c_char,
+    cache_dir: *const c_char,
+    molten_vk_library: *const c_char,
+    settings: Cinder64Settings,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Cinder64BridgeAPI {
+    abi_version: u32,
+    struct_size: u32,
+    surface_descriptor_size: u32,
+    settings_size: u32,
+    open_rom_request_size: u32,
+    metrics_size: u32,
+    error_size: u32,
+    reserved: u32,
+    create_session: usize,
+    destroy_session: usize,
+    attach_surface: usize,
+    update_surface: usize,
+    open_rom: usize,
+    pause: usize,
+    resume: usize,
+    reset: usize,
+    save_state: usize,
+    load_state: usize,
+    update_settings: usize,
+    set_keyboard_key: usize,
+    stop: usize,
+    pump_events: usize,
+    get_last_error: usize,
+    get_metrics: usize,
+    version: usize,
+    renderer_name: usize,
+    surface_event: usize,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct HostSurfaceDescriptor {
+    surface_id: u64,
+    generation: u64,
     window_handle: usize,
     view_handle: usize,
     logical_width: i32,
@@ -24,7 +130,9 @@ struct HostSurfaceDescriptor {
 
 impl HostSurfaceDescriptor {
     fn is_valid(&self) -> bool {
-        self.window_handle != 0
+        self.surface_id != 0
+            && self.generation != 0
+            && self.window_handle != 0
             && self.view_handle != 0
             && self.logical_width > 0
             && self.logical_height > 0
@@ -34,12 +142,14 @@ impl HostSurfaceDescriptor {
             && self.revision > 0
     }
 
-    fn matches_handles(&self, other: &HostSurfaceDescriptor) -> bool {
-        self.window_handle == other.window_handle && self.view_handle == other.view_handle
+    fn matches_generation(&self, other: &HostSurfaceDescriptor) -> bool {
+        self.surface_id == other.surface_id && self.generation == other.generation
     }
 
     fn matches_committed_geometry(&self, other: &HostSurfaceDescriptor) -> bool {
-        self.matches_handles(other)
+        self.matches_generation(other)
+            && self.window_handle == other.window_handle
+            && self.view_handle == other.view_handle
             && self.logical_width == other.logical_width
             && self.logical_height == other.logical_height
             && self.pixel_width == other.pixel_width
@@ -122,6 +232,7 @@ pub struct BridgeSession {
     settings: RuntimeSettings,
     renderer_name: CString,
     last_error: CString,
+    last_error_code: u32,
     last_surface_event: CString,
     frame_rate: f64,
     sdl_window: Option<EmbeddedWindowHandle>,
@@ -129,6 +240,10 @@ pub struct BridgeSession {
     runtime_status: Arc<Mutex<RuntimeStatus>>,
     emulation_thread: Option<JoinHandle<()>>,
     pump_tick_count: u64,
+    vi_count: u64,
+    render_frame_count: u64,
+    present_count: u64,
+    pending_command_count: u64,
     last_metrics_sample_at: Option<Instant>,
 }
 
@@ -150,6 +265,7 @@ impl BridgeSession {
             },
             renderer_name: CString::new("gopher64 + parallel-rdp (embedded)").unwrap(),
             last_error: CString::new("").unwrap(),
+            last_error_code: STATUS_OK as u32,
             last_surface_event: CString::new("").unwrap(),
             frame_rate: 0.0,
             sdl_window: None,
@@ -157,20 +273,30 @@ impl BridgeSession {
             runtime_status: Arc::new(Mutex::new(RuntimeStatus::default())),
             emulation_thread: None,
             pump_tick_count: 0,
+            vi_count: 0,
+            render_frame_count: 0,
+            present_count: 0,
+            pending_command_count: 0,
             last_metrics_sample_at: None,
         }
     }
 
-    fn set_error(&mut self, message: impl AsRef<str>) -> i32 {
+    fn set_error_with_status(&mut self, status: i32, message: impl AsRef<str>) -> i32 {
         self.last_error = sanitize_c_string(message.as_ref());
+        self.last_error_code = status as u32;
         if let Ok(mut status) = self.runtime_status.lock() {
             status.last_error = Some(message.as_ref().to_string());
         }
-        -1
+        status
+    }
+
+    fn set_error(&mut self, message: impl AsRef<str>) -> i32 {
+        self.set_error_with_status(STATUS_RUNTIME_ERROR, message)
     }
 
     fn clear_error(&mut self) {
         self.last_error = CString::new("").unwrap();
+        self.last_error_code = STATUS_OK as u32;
         if let Ok(mut status) = self.runtime_status.lock() {
             status.last_error = None;
         }
@@ -188,6 +314,7 @@ impl BridgeSession {
             .and_then(|status| status.last_error.clone());
         if let Some(message) = runtime_error {
             self.last_error = sanitize_c_string(&message);
+            self.last_error_code = STATUS_RUNTIME_ERROR as u32;
         }
     }
 
@@ -198,6 +325,31 @@ impl BridgeSession {
                 .lock()
                 .map(|status| status.active)
                 .unwrap_or(false)
+    }
+
+    fn metrics(&self) -> Cinder64Metrics {
+        Cinder64Metrics {
+            pump_tick_count: self.pump_tick_count,
+            vi_count: self.vi_count,
+            render_frame_count: self.render_frame_count,
+            present_count: self.present_count,
+            frame_rate_hz: self.frame_rate,
+            pending_command_count: self.pending_command_count,
+            runtime_state: self
+                .runtime_status
+                .lock()
+                .map(|status| {
+                    if !status.active {
+                        0
+                    } else if status.running && !status.paused {
+                        2
+                    } else {
+                        1
+                    }
+                })
+                .unwrap_or(0),
+            reserved: 0,
+        }
     }
 }
 
@@ -223,6 +375,13 @@ fn update_measured_frame_rate(
     session.last_metrics_sample_at = Some(now);
 
     let (frames_rendered, vi_events) = counters;
+    session.render_frame_count = session
+        .render_frame_count
+        .saturating_add(frames_rendered as u64);
+    session.present_count = session
+        .present_count
+        .saturating_add(frames_rendered as u64);
+    session.vi_count = session.vi_count.saturating_add(vi_events as u64);
     if vi_events == 0 {
         return None;
     }
@@ -237,7 +396,7 @@ fn update_measured_frame_rate(
 }
 
 unsafe fn session_from_ptr<'a>(session: *mut BridgeSession) -> Result<&'a mut BridgeSession, i32> {
-    session.as_mut().ok_or(-1)
+    session.as_mut().ok_or(STATUS_INVALID_ARGUMENT)
 }
 
 fn c_string_from_ptr(value: *const c_char) -> Result<String, String> {
@@ -258,6 +417,50 @@ fn normalize_upscale(value: i32) -> u32 {
         4..=7 => 4,
         _ => 8,
     }
+}
+
+impl From<Cinder64SurfaceDescriptor> for HostSurfaceDescriptor {
+    fn from(value: Cinder64SurfaceDescriptor) -> Self {
+        Self {
+            surface_id: value.surface_id,
+            generation: value.generation,
+            window_handle: value.window_handle,
+            view_handle: value.view_handle,
+            logical_width: value.logical_width,
+            logical_height: value.logical_height,
+            pixel_width: value.pixel_width.max(1) as u32,
+            pixel_height: value.pixel_height.max(1) as u32,
+            backing_scale_factor: value.backing_scale_factor,
+            revision: value.revision,
+        }
+    }
+}
+
+impl From<Cinder64Settings> for RuntimeSettings {
+    fn from(value: Cinder64Settings) -> Self {
+        Self {
+            fullscreen: value.fullscreen != 0,
+            mute_audio: value.mute_audio != 0,
+            speed_percent: value.speed_percent.clamp(25, 300),
+            upscale_multiplier: value.upscale_multiplier.clamp(1, 8),
+            integer_scaling: value.integer_scaling != 0,
+            crt_filter: value.crt_filter != 0,
+            active_save_slot: 0,
+        }
+    }
+}
+
+unsafe fn copy_error_to_out(session: &mut BridgeSession, out_error: *mut Cinder64Error) -> i32 {
+    let Some(out_error) = out_error.as_mut() else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    session.update_error_from_runtime();
+    *out_error = Cinder64Error {
+        code: session.last_error_code,
+        reserved: 0,
+        message: session.last_error.as_ptr(),
+    };
+    STATUS_OK
 }
 
 fn load_rom_contents(path: &Path) -> Result<Vec<u8>, String> {
@@ -300,7 +503,7 @@ fn determine_surface_apply_action(
         {
             SurfaceApplyAction::NoOp
         }
-        Some(applied) if applied.matches_handles(incoming) => SurfaceApplyAction::Resize,
+        Some(applied) if applied.matches_generation(incoming) => SurfaceApplyAction::Resize,
         Some(_) => SurfaceApplyAction::Reattach,
     }
 }
@@ -311,7 +514,9 @@ fn surface_event_message(
     details: &str,
 ) -> String {
     format!(
-        "render-surface action={action} revision={} logical={}x{} pixel={}x{} scale={:.2} {details}",
+        "render-surface action={action} surface_id={} generation={} revision={} logical={}x{} pixel={}x{} scale={:.2} {details}",
+        surface.surface_id,
+        surface.generation,
         surface.revision,
         surface.logical_width,
         surface.logical_height,
@@ -516,6 +721,11 @@ fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
         session.last_applied_surface = None;
         session.current_rom_path = None;
         session.frame_rate = 0.0;
+        session.pump_tick_count = 0;
+        session.vi_count = 0;
+        session.render_frame_count = 0;
+        session.present_count = 0;
+        session.pending_command_count = 0;
         session.last_metrics_sample_at = None;
         return Ok(());
     }
@@ -544,6 +754,11 @@ fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
     session.last_applied_surface = None;
     session.current_rom_path = None;
     session.frame_rate = 0.0;
+    session.pump_tick_count = 0;
+    session.vi_count = 0;
+    session.render_frame_count = 0;
+    session.present_count = 0;
+    session.pending_command_count = 0;
     session.last_metrics_sample_at = None;
     if let Ok(mut status) = session.runtime_status.lock() {
         status.active = false;
@@ -593,6 +808,8 @@ pub unsafe extern "C" fn cinder64_bridge_attach_surface(
     };
 
     let surface = HostSurfaceDescriptor {
+        surface_id: 1,
+        generation: 1,
         window_handle,
         view_handle,
         logical_width,
@@ -646,6 +863,8 @@ pub unsafe extern "C" fn cinder64_bridge_update_surface(
     };
 
     let surface = HostSurfaceDescriptor {
+        surface_id: 1,
+        generation: 1,
         window_handle,
         view_handle,
         logical_width,
@@ -766,6 +985,10 @@ pub unsafe extern "C" fn cinder64_bridge_open_rom(
         session.renderer_name = CString::new("gopher64 + parallel-rdp (embedded)").unwrap();
         session.frame_rate = 0.0;
         session.pump_tick_count = 0;
+        session.vi_count = 0;
+        session.render_frame_count = 0;
+        session.present_count = 0;
+        session.pending_command_count = 0;
         if let Ok(mut status) = session.runtime_status.lock() {
             status.active = false;
             status.running = false;
@@ -1065,6 +1288,128 @@ pub unsafe extern "C" fn cinder64_bridge_surface_event(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn cinder64_bridge_attach_surface_v1(
+    session: *mut BridgeSession,
+    descriptor: *const Cinder64SurfaceDescriptor,
+) -> i32 {
+    let Ok(session) = session_from_ptr(session) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Some(descriptor) = descriptor.as_ref() else {
+        return session.set_error_with_status(
+            STATUS_INVALID_ARGUMENT,
+            "The Swift host provided a null render surface descriptor.",
+        );
+    };
+
+    let surface = HostSurfaceDescriptor::from(*descriptor);
+    if !surface.is_valid() {
+        return session.set_error_with_status(
+            STATUS_INVALID_ARGUMENT,
+            "The Swift host provided an invalid embedded render surface descriptor.",
+        );
+    }
+
+    if session.has_active_runtime() {
+        match apply_surface_update(session, surface) {
+            Ok(_) => {
+                session.clear_error();
+                STATUS_OK
+            }
+            Err(message) => session.set_error_with_status(STATUS_RUNTIME_ERROR, message),
+        }
+    } else {
+        session.set_surface_event(surface_event_message(
+            "pending",
+            &surface,
+            "reason=runtime-inactive",
+        ));
+        session.surface = Some(surface);
+        session.clear_error();
+        STATUS_OK
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cinder64_bridge_update_surface_v1(
+    session: *mut BridgeSession,
+    descriptor: *const Cinder64SurfaceDescriptor,
+) -> i32 {
+    cinder64_bridge_attach_surface_v1(session, descriptor)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cinder64_bridge_open_rom_v1(
+    session: *mut BridgeSession,
+    request: *const Cinder64OpenRomRequest,
+) -> i32 {
+    let Some(request) = request.as_ref() else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+
+    cinder64_bridge_open_rom(
+        session,
+        request.rom_path,
+        request.config_dir,
+        request.data_dir,
+        request.cache_dir,
+        request.molten_vk_library,
+        request.settings.fullscreen,
+        request.settings.mute_audio,
+        request.settings.speed_percent,
+        request.settings.upscale_multiplier,
+        request.settings.integer_scaling,
+        request.settings.crt_filter,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cinder64_bridge_update_settings_v1(
+    session: *mut BridgeSession,
+    settings: *const Cinder64Settings,
+) -> i32 {
+    let Some(settings) = settings.as_ref() else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+
+    cinder64_bridge_update_settings(
+        session,
+        settings.fullscreen,
+        settings.mute_audio,
+        settings.speed_percent,
+        settings.upscale_multiplier,
+        settings.integer_scaling,
+        settings.crt_filter,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cinder64_bridge_get_last_error_v1(
+    session: *mut BridgeSession,
+    out_error: *mut Cinder64Error,
+) -> i32 {
+    let Ok(session) = session_from_ptr(session) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    copy_error_to_out(session, out_error)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cinder64_bridge_get_metrics_v1(
+    session: *mut BridgeSession,
+    out_metrics: *mut Cinder64Metrics,
+) -> i32 {
+    let Ok(session) = session_from_ptr(session) else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    let Some(out_metrics) = out_metrics.as_mut() else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+    *out_metrics = session.metrics();
+    STATUS_OK
+}
+
 #[cfg(test)]
 mod surface_state_tests;
 
@@ -1087,4 +1432,55 @@ pub unsafe extern "C" fn cinder64_bridge_frame_rate(session: *mut BridgeSession)
         Ok(session) => session.frame_rate,
         Err(_) => 0.0,
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cinder64_bridge_get_api(
+    requested_abi_version: u32,
+    api_struct_size: u32,
+    out_api: *mut Cinder64BridgeAPI,
+) -> i32 {
+    if requested_abi_version != CINDER64_BRIDGE_ABI_VERSION {
+        return STATUS_ABI_MISMATCH;
+    }
+
+    let Some(out_api) = out_api.as_mut() else {
+        return STATUS_INVALID_ARGUMENT;
+    };
+
+    if api_struct_size != std::mem::size_of::<Cinder64BridgeAPI>() as u32 {
+        return STATUS_ABI_MISMATCH;
+    }
+
+    *out_api = Cinder64BridgeAPI {
+        abi_version: CINDER64_BRIDGE_ABI_VERSION,
+        struct_size: std::mem::size_of::<Cinder64BridgeAPI>() as u32,
+        surface_descriptor_size: std::mem::size_of::<Cinder64SurfaceDescriptor>() as u32,
+        settings_size: std::mem::size_of::<Cinder64Settings>() as u32,
+        open_rom_request_size: std::mem::size_of::<Cinder64OpenRomRequest>() as u32,
+        metrics_size: std::mem::size_of::<Cinder64Metrics>() as u32,
+        error_size: std::mem::size_of::<Cinder64Error>() as u32,
+        reserved: 0,
+        create_session: cinder64_bridge_create_session as *const () as usize,
+        destroy_session: cinder64_bridge_destroy_session as *const () as usize,
+        attach_surface: cinder64_bridge_attach_surface_v1 as *const () as usize,
+        update_surface: cinder64_bridge_update_surface_v1 as *const () as usize,
+        open_rom: cinder64_bridge_open_rom_v1 as *const () as usize,
+        pause: cinder64_bridge_pause as *const () as usize,
+        resume: cinder64_bridge_resume as *const () as usize,
+        reset: cinder64_bridge_reset as *const () as usize,
+        save_state: cinder64_bridge_save_state as *const () as usize,
+        load_state: cinder64_bridge_load_state as *const () as usize,
+        update_settings: cinder64_bridge_update_settings_v1 as *const () as usize,
+        set_keyboard_key: cinder64_bridge_set_keyboard_key as *const () as usize,
+        stop: cinder64_bridge_stop as *const () as usize,
+        pump_events: cinder64_bridge_pump_events as *const () as usize,
+        get_last_error: cinder64_bridge_get_last_error_v1 as *const () as usize,
+        get_metrics: cinder64_bridge_get_metrics_v1 as *const () as usize,
+        version: cinder64_bridge_version as *const () as usize,
+        renderer_name: cinder64_bridge_renderer_name as *const () as usize,
+        surface_event: cinder64_bridge_surface_event as *const () as usize,
+    };
+
+    STATUS_OK
 }

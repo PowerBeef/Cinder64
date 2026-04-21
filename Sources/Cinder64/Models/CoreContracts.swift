@@ -111,6 +111,8 @@ struct AppRuntimeDirectories: Codable, Equatable, Sendable {
 }
 
 struct RenderSurfaceDescriptor: Equatable, Sendable {
+    let surfaceID: UInt64
+    let generation: UInt64
     let windowHandle: UInt
     let viewHandle: UInt
     let logicalWidth: Int
@@ -121,6 +123,8 @@ struct RenderSurfaceDescriptor: Equatable, Sendable {
     let revision: UInt64
 
     init(
+        surfaceID: UInt64 = 1,
+        generation: UInt64 = 1,
         windowHandle: UInt,
         viewHandle: UInt,
         logicalWidth: Int,
@@ -130,6 +134,8 @@ struct RenderSurfaceDescriptor: Equatable, Sendable {
         backingScaleFactor: Double,
         revision: UInt64
     ) {
+        self.surfaceID = surfaceID
+        self.generation = generation
         self.windowHandle = windowHandle
         self.viewHandle = viewHandle
         self.logicalWidth = logicalWidth
@@ -150,6 +156,8 @@ struct RenderSurfaceDescriptor: Equatable, Sendable {
         let pixelWidth = Int((Double(width) * backingScaleFactor).rounded())
         let pixelHeight = Int((Double(height) * backingScaleFactor).rounded())
         self.init(
+            surfaceID: 1,
+            generation: 1,
             windowHandle: windowHandle,
             viewHandle: viewHandle,
             logicalWidth: width,
@@ -165,7 +173,9 @@ struct RenderSurfaceDescriptor: Equatable, Sendable {
     var height: Int { logicalHeight }
 
     var isValid: Bool {
-        windowHandle != 0 &&
+        surfaceID != 0 &&
+            generation != 0 &&
+            windowHandle != 0 &&
             viewHandle != 0 &&
             logicalWidth > 0 &&
             logicalHeight > 0 &&
@@ -175,8 +185,13 @@ struct RenderSurfaceDescriptor: Equatable, Sendable {
             revision > 0
     }
 
+    func matchesSurfaceIdentity(of other: RenderSurfaceDescriptor) -> Bool {
+        surfaceID == other.surfaceID && generation == other.generation
+    }
+
     func matchesCommittedGeometry(of other: RenderSurfaceDescriptor) -> Bool {
-        windowHandle == other.windowHandle &&
+        matchesSurfaceIdentity(of: other) &&
+            windowHandle == other.windowHandle &&
             viewHandle == other.viewHandle &&
             logicalWidth == other.logicalWidth &&
             logicalHeight == other.logicalHeight &&
@@ -188,6 +203,26 @@ struct RenderSurfaceDescriptor: Equatable, Sendable {
     func matchesHandles(of other: RenderSurfaceDescriptor) -> Bool {
         windowHandle == other.windowHandle && viewHandle == other.viewHandle
     }
+}
+
+struct CoreRuntimeMetrics: Equatable, Sendable {
+    let pumpTickCount: UInt64
+    let viCount: UInt64
+    let renderFrameCount: UInt64
+    let presentCount: UInt64
+    let frameRateHz: Double
+    let pendingCommandCount: UInt64
+    let runtimeState: Int32
+
+    static let zero = CoreRuntimeMetrics(
+        pumpTickCount: 0,
+        viCount: 0,
+        renderFrameCount: 0,
+        presentCount: 0,
+        frameRateHz: 0,
+        pendingCommandCount: 0,
+        runtimeState: 0
+    )
 }
 
 struct CoreHostConfiguration: Equatable, Sendable {
@@ -208,7 +243,7 @@ enum CoreRuntimeEvent: Equatable, Sendable {
 protocol CoreHosting: AnyObject {
     func openROM(at url: URL, configuration: CoreHostConfiguration) async throws -> SessionSnapshot
     func updateRenderSurface(_ descriptor: RenderSurfaceDescriptor) async throws
-    func pumpEvents() -> CoreRuntimeEvent?
+    func pumpEvents() async -> CoreRuntimeEvent?
     func pause() async throws
     func resume() async throws -> SessionSnapshot
     func reset() async throws
@@ -218,7 +253,8 @@ protocol CoreHosting: AnyObject {
     func loadProtectedCloseState(slot: Int) async throws
     func updateSettings(_ settings: CoreUserSettings) async throws
     func updateInputMapping(_ mapping: InputMappingProfile) async throws
-    func setKeyboardKey(scancode: Int32, pressed: Bool) async throws
+    func enqueueKeyboardInput(_ event: EmbeddedKeyboardEvent) async throws
+    func releaseKeyboardInput() async throws
     func stop() async throws
     func dispose() async throws
 }

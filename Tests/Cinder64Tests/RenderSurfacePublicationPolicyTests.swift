@@ -4,6 +4,8 @@ import Testing
 struct RenderSurfacePublicationPolicyTests {
     @Test func unchangedGeometryDoesNotRepublish() {
         let committed = RenderSurfaceDescriptor(
+            surfaceID: 1,
+            generation: 1,
             windowHandle: 0xCAFE,
             viewHandle: 0xBEEF,
             logicalWidth: 640,
@@ -25,6 +27,8 @@ struct RenderSurfacePublicationPolicyTests {
 
     @Test func liveResizeCoalescesIntoOneCommittedUpdate() {
         let committed = RenderSurfaceDescriptor(
+            surfaceID: 1,
+            generation: 1,
             windowHandle: 0xCAFE,
             viewHandle: 0xBEEF,
             logicalWidth: 640,
@@ -35,6 +39,8 @@ struct RenderSurfacePublicationPolicyTests {
             revision: 3
         )
         let resized = RenderSurfaceDescriptor(
+            surfaceID: 1,
+            generation: 1,
             windowHandle: 0xCAFE,
             viewHandle: 0xBEEF,
             logicalWidth: 700,
@@ -62,6 +68,8 @@ struct RenderSurfacePublicationPolicyTests {
 
     @Test func handleChangeForcesReattach() {
         let committed = RenderSurfaceDescriptor(
+            surfaceID: 1,
+            generation: 1,
             windowHandle: 0xCAFE,
             viewHandle: 0xBEEF,
             logicalWidth: 640,
@@ -72,6 +80,8 @@ struct RenderSurfacePublicationPolicyTests {
             revision: 3
         )
         let reattached = RenderSurfaceDescriptor(
+            surfaceID: 1,
+            generation: 2,
             windowHandle: 0xFACE,
             viewHandle: 0xD00D,
             logicalWidth: 640,
@@ -93,6 +103,8 @@ struct RenderSurfacePublicationPolicyTests {
 
     @Test func scaleChangeUsesResizeInsteadOfReattach() {
         let committed = RenderSurfaceDescriptor(
+            surfaceID: 1,
+            generation: 1,
             windowHandle: 0xCAFE,
             viewHandle: 0xBEEF,
             logicalWidth: 640,
@@ -103,6 +115,8 @@ struct RenderSurfacePublicationPolicyTests {
             revision: 3
         )
         let rescaled = RenderSurfaceDescriptor(
+            surfaceID: 1,
+            generation: 1,
             windowHandle: 0xCAFE,
             viewHandle: 0xBEEF,
             logicalWidth: 640,
@@ -120,5 +134,40 @@ struct RenderSurfacePublicationPolicyTests {
         )
 
         #expect(decision == .publish(rescaled, kind: .resize))
+    }
+
+    @Test func generationChangeForcesReattachEvenIfHandlesStayTheSame() {
+        let committed = RenderSurfaceDescriptor(
+            surfaceID: 7,
+            generation: 3,
+            windowHandle: 0xCAFE,
+            viewHandle: 0xBEEF,
+            logicalWidth: 640,
+            logicalHeight: 480,
+            pixelWidth: 1280,
+            pixelHeight: 960,
+            backingScaleFactor: 2,
+            revision: 3
+        )
+        let replacement = RenderSurfaceDescriptor(
+            surfaceID: 7,
+            generation: 4,
+            windowHandle: 0xCAFE,
+            viewHandle: 0xBEEF,
+            logicalWidth: 640,
+            logicalHeight: 480,
+            pixelWidth: 1280,
+            pixelHeight: 960,
+            backingScaleFactor: 2,
+            revision: 1
+        )
+
+        let decision = RenderSurfacePublicationPolicy.decide(
+            previousCommitted: committed,
+            proposed: replacement,
+            isLiveResize: false
+        )
+
+        #expect(decision == .publish(replacement, kind: .reattach))
     }
 }

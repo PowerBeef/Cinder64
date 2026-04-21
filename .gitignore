@@ -4,6 +4,7 @@
 /dist
 /ThirdParty/gopher64/cinder64_bridge/target
 .codex/
+.claude/
 xcuserdata/
 DerivedData/
 .swiftpm/configuration/registries.json

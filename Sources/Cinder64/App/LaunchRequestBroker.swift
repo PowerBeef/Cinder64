@@ -4,7 +4,10 @@ import Foundation
 final class LaunchRequestBroker {
     typealias LaunchHandler = @MainActor (URL) async -> Void
 
-    static let shared = LaunchRequestBroker(arguments: CommandLine.arguments)
+    static let shared = LaunchRequestBroker(
+        arguments: CommandLine.arguments,
+        environment: ProcessInfo.processInfo.environment
+    )
 
     private var pendingURL: URL?
     private var launchHandler: LaunchHandler?
@@ -13,9 +16,9 @@ final class LaunchRequestBroker {
     let scriptedKeySteps: [ScriptedKeyStep]
     let scriptedKeyParseError: String?
 
-    init(arguments: [String]) {
+    init(arguments: [String], environment: [String: String] = [:]) {
         pendingURL = Self.extractLaunchURLs(from: arguments).last
-        let scripted = Self.parseScriptedKeys(from: arguments)
+        let scripted = Self.parseScriptedKeys(from: arguments, environment: environment)
         scriptedKeySteps = scripted.steps
         scriptedKeyParseError = scripted.error
     }
@@ -78,7 +81,10 @@ final class LaunchRequestBroker {
         return launchURLs
     }
 
-    private static func parseScriptedKeys(from arguments: [String]) -> (steps: [ScriptedKeyStep], error: String?) {
+    private static func parseScriptedKeys(
+        from arguments: [String],
+        environment: [String: String]
+    ) -> (steps: [ScriptedKeyStep], error: String?) {
         var iterator = arguments.dropFirst().makeIterator()
         var rawValue: String?
 
@@ -88,6 +94,10 @@ final class LaunchRequestBroker {
             } else if argument == "--app-support-root" {
                 _ = iterator.next()
             }
+        }
+
+        if rawValue == nil {
+            rawValue = environment["CINDER64_SCRIPTED_KEYS"]
         }
 
         guard let rawValue, rawValue.isEmpty == false else {

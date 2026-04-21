@@ -109,6 +109,7 @@ private final class RenderSurfaceHostingView: NSView {
         subsystem: Bundle.main.bundleIdentifier ?? "com.patricedery.Cinder64",
         category: "RenderSurface"
     )
+    private static var nextSurfaceID: UInt64 = 1
 
     var surfaceChanged: (RenderSurfaceDescriptor?) -> Void = { _ in }
     var keyboardInputChanged: (EmbeddedKeyboardEvent) -> Void = { _ in }
@@ -120,12 +121,18 @@ private final class RenderSurfaceHostingView: NSView {
     private var lastCommittedDescriptor: RenderSurfaceDescriptor?
     private var lastDeferredRevision: UInt64?
     private var eventPumpDeferredForLiveResize = false
+    private let surfaceID: UInt64
+    private var surfaceGeneration: UInt64
 
     override var acceptsFirstResponder: Bool {
         true
     }
 
     override init(frame frameRect: NSRect) {
+        let identifier = Self.nextSurfaceID
+        Self.nextSurfaceID = Self.nextSurfaceID &+ 1
+        self.surfaceID = identifier
+        self.surfaceGeneration = 1
         super.init(frame: frameRect)
         wantsLayer = true
         layerContentsRedrawPolicy = .duringViewResize
@@ -219,6 +226,9 @@ private final class RenderSurfaceHostingView: NSView {
         guard size.width > 0, size.height > 0, let window else {
             if lastCommittedDescriptor != nil {
                 Self.logger.info("render-surface invalidated")
+                if let lastCommittedDescriptor {
+                    surfaceGeneration = lastCommittedDescriptor.generation &+ 1
+                }
                 lastCommittedDescriptor = nil
                 lastDeferredRevision = nil
             }
@@ -231,23 +241,43 @@ private final class RenderSurfaceHostingView: NSView {
         let pixelWidth = max(Int((size.width * window.backingScaleFactor).rounded()), 1)
         let pixelHeight = max(Int((size.height * window.backingScaleFactor).rounded()), 1)
 
+        let currentWindowHandle = UInt(bitPattern: Unmanaged.passUnretained(window).toOpaque())
+        let currentViewHandle = UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque())
+
+        let generation: UInt64
+        if let lastCommittedDescriptor {
+            if lastCommittedDescriptor.windowHandle == currentWindowHandle &&
+                lastCommittedDescriptor.viewHandle == currentViewHandle {
+                generation = lastCommittedDescriptor.generation
+            } else {
+                generation = max(surfaceGeneration, lastCommittedDescriptor.generation &+ 1)
+            }
+        } else {
+            generation = max(surfaceGeneration, 1)
+        }
+
         let nextRevision: UInt64
         if let lastCommittedDescriptor,
-           lastCommittedDescriptor.windowHandle == UInt(bitPattern: Unmanaged.passUnretained(window).toOpaque()),
-           lastCommittedDescriptor.viewHandle == UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque()),
+           lastCommittedDescriptor.generation == generation,
+           lastCommittedDescriptor.windowHandle == currentWindowHandle,
+           lastCommittedDescriptor.viewHandle == currentViewHandle,
            lastCommittedDescriptor.logicalWidth == logicalWidth,
            lastCommittedDescriptor.logicalHeight == logicalHeight,
            lastCommittedDescriptor.pixelWidth == pixelWidth,
            lastCommittedDescriptor.pixelHeight == pixelHeight,
            lastCommittedDescriptor.backingScaleFactor == window.backingScaleFactor {
             nextRevision = lastCommittedDescriptor.revision
+        } else if let lastCommittedDescriptor, lastCommittedDescriptor.generation == generation {
+            nextRevision = lastCommittedDescriptor.revision &+ 1
         } else {
-            nextRevision = (lastCommittedDescriptor?.revision ?? 0) + 1
+            nextRevision = 1
         }
 
         let descriptor = RenderSurfaceDescriptor(
-            windowHandle: UInt(bitPattern: Unmanaged.passUnretained(window).toOpaque()),
-            viewHandle: UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque()),
+            surfaceID: surfaceID,
+            generation: generation,
+            windowHandle: currentWindowHandle,
+            viewHandle: currentViewHandle,
             logicalWidth: logicalWidth,
             logicalHeight: logicalHeight,
             pixelWidth: pixelWidth,
@@ -294,9 +324,10 @@ private final class RenderSurfaceHostingView: NSView {
         case let .publish(descriptor, kind):
             syncMetalLayer(using: descriptor, commitsDrawableSize: true)
             lastCommittedDescriptor = descriptor
+            surfaceGeneration = descriptor.generation
             lastDeferredRevision = nil
             Self.logger.info(
-                "render-surface published kind=\(kind.logValue, privacy: .public) revision=\(descriptor.revision) logical=\(descriptor.logicalWidth)x\(descriptor.logicalHeight) pixel=\(descriptor.pixelWidth)x\(descriptor.pixelHeight) scale=\(descriptor.backingScaleFactor, format: .fixed(precision: 2))"
+                "render-surface published kind=\(kind.logValue, privacy: .public) surfaceID=\(descriptor.surfaceID) generation=\(descriptor.generation) revision=\(descriptor.revision) logical=\(descriptor.logicalWidth)x\(descriptor.logicalHeight) pixel=\(descriptor.pixelWidth)x\(descriptor.pixelHeight) scale=\(descriptor.backingScaleFactor, format: .fixed(precision: 2))"
             )
             surfaceChanged(descriptor)
         }

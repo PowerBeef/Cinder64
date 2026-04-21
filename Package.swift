@@ -9,12 +9,18 @@ let package = Package(
         .macOS(.v15),
     ],
     targets: [
+        .target(
+            name: "Cinder64BridgeABI",
+            path: "Sources/Cinder64BridgeABI",
+            publicHeadersPath: "include"
+        ),
         .executableTarget(
-            name: "Cinder64"
+            name: "Cinder64",
+            dependencies: ["Cinder64BridgeABI"]
         ),
         .testTarget(
             name: "Cinder64Tests",
-            dependencies: ["Cinder64"]
+            dependencies: ["Cinder64", "Cinder64BridgeABI"]
         ),
     ],
     swiftLanguageModes: [.v6]
