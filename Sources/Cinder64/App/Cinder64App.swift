@@ -168,6 +168,11 @@ struct Cinder64App: App {
         }
         reactivateMainWindow()
         mainWindowController.apply(mode: MainWindowDisplayMode(settings: session.activeSettings))
+        // After a successful ROM boot, hand keyboard focus to the
+        // emulator display window so the user can start playing
+        // immediately — without this, input routing would stay on the
+        // main window until the user clicks into the gameplay stage.
+        emulatorDisplayController.makeKey()
         startScriptedKeyPlaybackIfNeeded()
     }
 
@@ -231,6 +236,13 @@ struct Cinder64App: App {
         }
         appDelegate.reopenTrackedMainWindow = {
             mainWindowController.reopenTrackedWindowIfNeeded()
+        }
+        // When the emulator display window loses key status — e.g.
+        // because a close-game sheet opens on the main window, another
+        // app steals focus, or the user Cmd+Tabs away — drop every
+        // held scancode in the embedded runtime so keys don't stick.
+        emulatorDisplayController.onKeyboardFocusLost = {
+            session.releaseKeyboardInput()
         }
     }
 

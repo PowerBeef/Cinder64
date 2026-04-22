@@ -654,13 +654,6 @@ private struct GameplayShellView: View {
         ActiveGameplayView(
             snapshot: snapshot,
             displayMode: displayMode,
-            // Pause keyboard capture while the close prompt sheet is up
-            // so .keyboardShortcut(.cancelAction) / .defaultAction can
-            // reach SwiftUI and menu shortcuts like Cmd+W / Cmd+Q aren't
-            // eaten by the surface view's NSEvent monitor. Phase 2 drops
-            // the global monitor entirely; in the meantime this flag
-            // keeps shortcuts working while the sheet is shown.
-            capturesKeyboardInput: snapshot.activeROM != nil && isClosePromptVisible == false,
             emulatorDisplayController: emulatorDisplayController,
             surfaceChanged: surfaceChanged,
             keyboardInputChanged: keyboardInputChanged,
@@ -762,7 +755,6 @@ private struct GameplayShellView: View {
 private struct ActiveGameplayView: View {
     let snapshot: SessionSnapshot
     let displayMode: MainWindowDisplayMode
-    let capturesKeyboardInput: Bool
     let emulatorDisplayController: EmulatorDisplayController
     let surfaceChanged: (RenderSurfaceDescriptor?) -> Void
     let keyboardInputChanged: (EmbeddedKeyboardEvent) -> Void
@@ -776,7 +768,6 @@ private struct ActiveGameplayView: View {
 
             RenderSurfaceView(
                 snapshot: snapshot,
-                capturesKeyboardInput: capturesKeyboardInput,
                 controller: emulatorDisplayController,
                 surfaceChanged: surfaceChanged,
                 keyboardInputChanged: keyboardInputChanged,

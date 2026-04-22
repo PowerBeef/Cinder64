@@ -13,7 +13,6 @@ import SwiftUI
 /// single source of truth for per-session input/output plumbing.
 struct RenderSurfaceView: View {
     let snapshot: SessionSnapshot
-    let capturesKeyboardInput: Bool
     let controller: EmulatorDisplayController
     let surfaceChanged: (RenderSurfaceDescriptor?) -> Void
     let keyboardInputChanged: (EmbeddedKeyboardEvent) -> Void
@@ -31,11 +30,7 @@ struct RenderSurfaceView: View {
             .shadow(color: ShellPalette.stageShadow, radius: 18, y: 8)
             .onAppear {
                 wireSurfaceCallbacks()
-                controller.surfaceView.setKeyboardCaptureEnabled(capturesKeyboardInput)
                 controller.updateOverlay(for: snapshot)
-            }
-            .onChange(of: capturesKeyboardInput) { _, newValue in
-                controller.surfaceView.setKeyboardCaptureEnabled(newValue)
             }
             .onChange(of: snapshot) { _, newValue in
                 controller.updateOverlay(for: newValue)

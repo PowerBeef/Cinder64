@@ -20,11 +20,9 @@ final class EmulatorDisplaySurfaceView: NSView {
 
     var surfaceChanged: (RenderSurfaceDescriptor?) -> Void = { _ in }
     var keyboardInputChanged: (EmbeddedKeyboardEvent) -> Void = { _ in }
-    var capturesKeyboardInput = false
     var pumpRuntimeEvents: () -> Void = {}
 
     private var eventPumpTimer: Timer?
-    private var localKeyboardEventMonitor: Any?
     private var lastCommittedDescriptor: RenderSurfaceDescriptor?
     private var lastDeferredRevision: UInt64?
     private var eventPumpDeferredForLiveResize = false
@@ -58,7 +56,6 @@ final class EmulatorDisplaySurfaceView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         configureEventPumpIfNeeded()
-        configureKeyboardEventMonitorIfNeeded()
         publishDescriptorIfPossible()
         focusHostForKeyboardInput()
     }
@@ -85,7 +82,6 @@ final class EmulatorDisplaySurfaceView: NSView {
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if newWindow == nil {
             invalidateEventPump()
-            removeKeyboardEventMonitor()
         }
         super.viewWillMove(toWindow: newWindow)
     }
@@ -253,18 +249,6 @@ final class EmulatorDisplaySurfaceView: NSView {
         )
     }
 
-    func setKeyboardCaptureEnabled(_ capturesKeyboardInput: Bool) {
-        let shouldRefocus = RenderSurfaceKeyboardFocusPolicy.shouldRefocus(
-            previousCapturesKeyboardInput: self.capturesKeyboardInput,
-            currentCapturesKeyboardInput: capturesKeyboardInput
-        )
-        self.capturesKeyboardInput = capturesKeyboardInput
-
-        if shouldRefocus {
-            focusHostForKeyboardInput()
-        }
-    }
-
     private func configureEventPumpIfNeeded() {
         guard eventPumpTimer == nil else { return }
 
@@ -282,37 +266,6 @@ final class EmulatorDisplaySurfaceView: NSView {
     private func invalidateEventPump() {
         eventPumpTimer?.invalidate()
         eventPumpTimer = nil
-    }
-
-    private func configureKeyboardEventMonitorIfNeeded() {
-        guard localKeyboardEventMonitor == nil else { return }
-
-        localKeyboardEventMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.keyDown, .keyUp, .flagsChanged]
-        ) { [weak self] event in
-            guard let self else { return event }
-
-            guard self.capturesKeyboardInput, let window = self.window, window.isKeyWindow else {
-                return event
-            }
-
-            if let eventWindow = event.window, eventWindow != window {
-                return event
-            }
-
-            if let keyboardEvent = self.keyboardEvent(from: event) {
-                self.keyboardInputChanged(keyboardEvent)
-                return nil
-            }
-
-            return event
-        }
-    }
-
-    private func removeKeyboardEventMonitor() {
-        guard let localKeyboardEventMonitor else { return }
-        NSEvent.removeMonitor(localKeyboardEventMonitor)
-        self.localKeyboardEventMonitor = nil
     }
 
     private func focusHostForKeyboardInput() {
