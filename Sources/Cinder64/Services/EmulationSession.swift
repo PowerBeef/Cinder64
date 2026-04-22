@@ -258,8 +258,16 @@ final class EmulationSession {
             snapshot = .idle
             advanceLifecycle(to: .stopped)
         } catch {
-            advanceLifecycle(to: .failed)
-            throw error
+            // Shutdown errors — notably the Rust 3-second MoltenVK-wedge
+            // timeout and the Swift 4-second task-group race that backs
+            // it up — leave the emulation thread intentionally
+            // abandoned but the Swift-side state fully recoverable. If
+            // we rethrow here the close-game coordinator stalls with
+            // the error pinned to the sheet and the user has no way to
+            // recover except Force Quit. Force-reset instead, leave a
+            // warning banner the home shell surfaces, and return
+            // successfully — the user's close intent is honored.
+            forceResetAfterShutdownFailure(error: error)
         }
     }
 
@@ -271,9 +279,38 @@ final class EmulationSession {
             snapshot = .idle
             advanceLifecycle(to: .disposed)
         } catch {
-            advanceLifecycle(to: .failed)
-            throw error
+            // Same recovery policy as stop() — see the comment above.
+            // For dispose the terminal state is .disposed (process
+            // tear-down path) rather than .stopped, but the effect on
+            // the Swift state is identical: clean slate, warning
+            // surfaced, caller sees success.
+            forceResetAfterShutdownFailure(error: error, terminal: .disposed)
         }
+    }
+
+    private func forceResetAfterShutdownFailure(
+        error: Error,
+        terminal: RuntimeLifecycleState = .stopped
+    ) {
+        persistenceStore.logStore.record(
+            "warning",
+            "session shutdown failed; forcing Swift-side cleanup: \(error.localizedDescription)"
+        )
+        deferredBootRenderSurface = nil
+        snapshot = SessionSnapshot(
+            emulationState: .stopped,
+            activeROM: nil,
+            rendererName: snapshot.rendererName,
+            fps: 0,
+            videoMode: .none,
+            audioMuted: false,
+            activeSaveSlot: 0,
+            warningBanner: WarningBanner(
+                title: "Emulator shutdown timed out",
+                message: "The embedded runtime didn't stop cleanly. The session has been reset; you can open another ROM."
+            )
+        )
+        advanceLifecycle(to: terminal)
     }
 
     func updateRenderSurface(_ descriptor: RenderSurfaceDescriptor?) {
@@ -335,6 +372,10 @@ final class EmulationSession {
 
     func presentWarning(title: String, message: String) {
         snapshot.warningBanner = WarningBanner(title: title, message: message)
+    }
+
+    func dismissWarningBanner() {
+        snapshot.warningBanner = nil
     }
 
     private func waitForValidRenderSurface() async -> RenderSurfaceDescriptor {

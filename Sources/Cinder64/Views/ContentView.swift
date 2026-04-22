@@ -159,14 +159,25 @@ private struct HomeShellView: View {
             )
             .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 250)
         } detail: {
-            HomeDashboardView(
-                content: HomeDashboardPresentation.content(for: session.recentGames),
-                recentGames: Array(session.recentGames.prefix(3)),
-                openROMRequested: openROMRequested,
-                launchROMRequested: launchROMRequested
-            )
-            .padding(.horizontal, 10)
-            .padding(.vertical, 12)
+            VStack(alignment: .leading, spacing: 12) {
+                if let banner = session.snapshot.warningBanner {
+                    WarningBannerBar(
+                        banner: banner,
+                        dismiss: { session.dismissWarningBanner() }
+                    )
+                    .padding(.horizontal, 12)
+                    .padding(.top, 12)
+                }
+
+                HomeDashboardView(
+                    content: HomeDashboardPresentation.content(for: session.recentGames),
+                    recentGames: Array(session.recentGames.prefix(3)),
+                    openROMRequested: openROMRequested,
+                    launchROMRequested: launchROMRequested
+                )
+                .padding(.horizontal, 10)
+                .padding(.vertical, 12)
+            }
         }
         .disabled(isResumePromptVisible)
         .navigationSplitViewStyle(.balanced)
@@ -850,6 +861,7 @@ struct SessionStatePill: View {
 
 private struct WarningBannerBar: View {
     let banner: WarningBanner
+    var dismiss: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -868,6 +880,16 @@ private struct WarningBannerBar: View {
             }
 
             Spacer(minLength: 0)
+
+            if let dismiss {
+                Button(action: dismiss) {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss warning")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)

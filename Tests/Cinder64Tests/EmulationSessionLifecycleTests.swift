@@ -70,6 +70,41 @@ struct EmulationSessionLifecycleTests {
         #expect(session.lifecycleState == RuntimeLifecycleState.stopped)
     }
 
+    @Test func stopSwallowsShutdownErrorAndSurfacesWarningBanner() async throws {
+        let harness = try LifecyclePersistenceHarness()
+        let core = LifecycleFakeCoreHost()
+        core.stopError = NSError(
+            domain: "test",
+            code: 42,
+            userInfo: [NSLocalizedDescriptionKey: "simulated MoltenVK wedge"]
+        )
+        let session = EmulationSession(
+            coreHost: core,
+            persistenceStore: harness.persistence
+        )
+
+        let romURL = harness.directory.appending(path: "Lylat Wars.z64")
+        try Data("rom".utf8).write(to: romURL)
+        session.updateRenderSurface(
+            RenderSurfaceDescriptor(
+                windowHandle: 0xABCD,
+                viewHandle: 0xEF01,
+                width: 1280,
+                height: 720,
+                backingScaleFactor: 2
+            )
+        )
+
+        try await session.openROM(url: romURL)
+        // Must not throw even though the underlying core host errored.
+        try await session.stop()
+
+        #expect(session.lifecycleState == RuntimeLifecycleState.stopped)
+        #expect(session.snapshot.emulationState == .stopped)
+        #expect(session.snapshot.activeROM == nil)
+        #expect(session.snapshot.warningBanner?.title == "Emulator shutdown timed out")
+    }
+
     @Test func runtimeFailureTransitionsToFailed() async throws {
         let harness = try LifecyclePersistenceHarness()
         let core = LifecycleFakeCoreHost()
@@ -103,6 +138,7 @@ struct EmulationSessionLifecycleTests {
 private final class LifecycleFakeCoreHost: CoreHosting {
     private(set) var recordedStates: [RuntimeLifecycleState] = []
     var nextPumpEvent: CoreRuntimeEvent?
+    var stopError: Error?
 
     private var lastIdentity: ROMIdentity?
 
@@ -155,7 +191,13 @@ private final class LifecycleFakeCoreHost: CoreHosting {
     func updateInputMapping(_ mapping: InputMappingProfile) async throws {}
     func enqueueKeyboardInput(_ event: EmbeddedKeyboardEvent) async throws {}
     func releaseKeyboardInput() async throws {}
-    func stop() async throws {}
+
+    func stop() async throws {
+        if let stopError {
+            throw stopError
+        }
+    }
+
     func dispose() async throws {}
 }
 
