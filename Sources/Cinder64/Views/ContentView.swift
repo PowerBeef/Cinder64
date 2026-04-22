@@ -27,30 +27,17 @@ struct ContentView: View {
             case .homeDashboard:
                 HomeShellView(
                     session: session,
-                    resumePrompt: closeGameCoordinator.resumePrompt,
+                    isResumePromptVisible: closeGameCoordinator.resumePrompt != nil,
                     openROMRequested: openROMRequested,
-                    launchROMRequested: launchROMRequested,
-                    continueRequested: {
-                        completePendingProtectedLaunchRequested(true)
-                    },
-                    startFreshRequested: {
-                        completePendingProtectedLaunchRequested(false)
-                    }
+                    launchROMRequested: launchROMRequested
                 )
             case .gameplay:
                 GameplayShellView(
                     snapshot: session.snapshot,
                     displayMode: displayMode,
                     actionAvailability: actionAvailability,
-                    closePrompt: closeGameCoordinator.closePrompt,
+                    isClosePromptVisible: closeGameCoordinator.closePrompt != nil,
                     returnHomeRequested: returnHomeRequested,
-                    cancelCloseGameRequested: closeGameCoordinator.cancelCloseGame,
-                    closeWithoutSavingRequested: {
-                        Task { await closeGameCoordinator.closeWithoutSaving() }
-                    },
-                    saveAndCloseRequested: {
-                        Task { await closeGameCoordinator.saveAndClose() }
-                    },
                     applyDisplayMode: applyDisplayMode,
                     pauseRequested: {
                         Task { try? await session.pause() }
@@ -80,8 +67,36 @@ struct ContentView: View {
                 )
             }
         }
-        .animation(.easeOut(duration: 0.18), value: closeGameCoordinator.closePrompt)
-        .animation(.easeOut(duration: 0.18), value: closeGameCoordinator.resumePrompt)
+        // Present both prompts as native macOS sheets. The earlier ZStack
+        // overlay approach was hidden behind the render surface's Metal
+        // layer — a known SwiftUI quirk where CAMetalLayer-backed
+        // NSViewRepresentable content composites above sibling SwiftUI
+        // views. Sheets are window-level and always appear on top.
+        .sheet(item: $closeGameCoordinator.closePrompt) { prompt in
+            CloseGamePromptCard(
+                prompt: prompt,
+                cancelRequested: closeGameCoordinator.cancelCloseGame,
+                closeWithoutSavingRequested: {
+                    Task { await closeGameCoordinator.closeWithoutSaving() }
+                },
+                saveAndCloseRequested: {
+                    Task { await closeGameCoordinator.saveAndClose() }
+                }
+            )
+            .frame(minWidth: 420, idealWidth: 460)
+        }
+        .sheet(item: $closeGameCoordinator.resumePrompt) { prompt in
+            ResumeProtectedSavePromptCard(
+                prompt: prompt,
+                continueRequested: {
+                    completePendingProtectedLaunchRequested(true)
+                },
+                startFreshRequested: {
+                    completePendingProtectedLaunchRequested(false)
+                }
+            )
+            .frame(minWidth: 420, idealWidth: 460)
+        }
     }
 }
 
@@ -130,44 +145,29 @@ enum ShellPalette {
 
 private struct HomeShellView: View {
     @Bindable var session: EmulationSession
-    let resumePrompt: ResumeProtectedSavePromptState?
+    let isResumePromptVisible: Bool
     let openROMRequested: () -> Void
     let launchROMRequested: (URL) -> Void
-    let continueRequested: () -> Void
-    let startFreshRequested: () -> Void
 
     var body: some View {
-        ZStack {
-            NavigationSplitView {
-                RecentGamesListView(
-                    session: session,
-                    openROMRequested: openROMRequested,
-                    launchROMRequested: launchROMRequested
-                )
-                .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 250)
-            } detail: {
-                HomeDashboardView(
-                    content: HomeDashboardPresentation.content(for: session.recentGames),
-                    recentGames: Array(session.recentGames.prefix(3)),
-                    openROMRequested: openROMRequested,
-                    launchROMRequested: launchROMRequested
-                )
-                .padding(.horizontal, 10)
-                .padding(.vertical, 12)
-            }
-            .disabled(resumePrompt != nil)
-
-            if let resumePrompt {
-                PromptOverlayContainer {
-                    ResumeProtectedSavePromptCard(
-                        prompt: resumePrompt,
-                        continueRequested: continueRequested,
-                        startFreshRequested: startFreshRequested
-                    )
-                }
-                .transition(.opacity.combined(with: .scale(scale: 0.98)))
-            }
+        NavigationSplitView {
+            RecentGamesListView(
+                session: session,
+                openROMRequested: openROMRequested,
+                launchROMRequested: launchROMRequested
+            )
+            .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 250)
+        } detail: {
+            HomeDashboardView(
+                content: HomeDashboardPresentation.content(for: session.recentGames),
+                recentGames: Array(session.recentGames.prefix(3)),
+                openROMRequested: openROMRequested,
+                launchROMRequested: launchROMRequested
+            )
+            .padding(.horizontal, 10)
+            .padding(.vertical, 12)
         }
+        .disabled(isResumePromptVisible)
         .navigationSplitViewStyle(.balanced)
     }
 }
@@ -596,11 +596,8 @@ private struct GameplayShellView: View {
     let snapshot: SessionSnapshot
     let displayMode: MainWindowDisplayMode
     let actionAvailability: SessionToolbarActionAvailability
-    let closePrompt: CloseGamePromptState?
+    let isClosePromptVisible: Bool
     let returnHomeRequested: () -> Void
-    let cancelCloseGameRequested: () -> Void
-    let closeWithoutSavingRequested: () -> Void
-    let saveAndCloseRequested: () -> Void
     let applyDisplayMode: (MainWindowDisplayMode) -> Void
     let pauseRequested: () -> Void
     let resumeRequested: () -> Void
@@ -618,11 +615,8 @@ private struct GameplayShellView: View {
         snapshot: SessionSnapshot,
         displayMode: MainWindowDisplayMode,
         actionAvailability: SessionToolbarActionAvailability,
-        closePrompt: CloseGamePromptState?,
+        isClosePromptVisible: Bool,
         returnHomeRequested: @escaping () -> Void,
-        cancelCloseGameRequested: @escaping () -> Void,
-        closeWithoutSavingRequested: @escaping () -> Void,
-        saveAndCloseRequested: @escaping () -> Void,
         applyDisplayMode: @escaping (MainWindowDisplayMode) -> Void,
         pauseRequested: @escaping () -> Void,
         resumeRequested: @escaping () -> Void,
@@ -637,11 +631,8 @@ private struct GameplayShellView: View {
         self.snapshot = snapshot
         self.displayMode = displayMode
         self.actionAvailability = actionAvailability
-        self.closePrompt = closePrompt
+        self.isClosePromptVisible = isClosePromptVisible
         self.returnHomeRequested = returnHomeRequested
-        self.cancelCloseGameRequested = cancelCloseGameRequested
-        self.closeWithoutSavingRequested = closeWithoutSavingRequested
-        self.saveAndCloseRequested = saveAndCloseRequested
         self.applyDisplayMode = applyDisplayMode
         self.pauseRequested = pauseRequested
         self.resumeRequested = resumeRequested
@@ -655,33 +646,20 @@ private struct GameplayShellView: View {
         _selectedSlot = State(initialValue: snapshot.activeSaveSlot)
     }
 
-    private var isClosePromptVisible: Bool {
-        closePrompt != nil
-    }
-
     var body: some View {
-        ZStack {
-            ActiveGameplayView(
-                snapshot: snapshot,
-                displayMode: displayMode,
-                surfaceChanged: surfaceChanged,
-                keyboardInputChanged: keyboardInputChanged,
-                pumpRuntimeEvents: pumpRuntimeEvents
-            )
-            .allowsHitTesting(isClosePromptVisible == false)
-
-            if let closePrompt {
-                PromptOverlayContainer {
-                    CloseGamePromptCard(
-                        prompt: closePrompt,
-                        cancelRequested: cancelCloseGameRequested,
-                        closeWithoutSavingRequested: closeWithoutSavingRequested,
-                        saveAndCloseRequested: saveAndCloseRequested
-                    )
-                }
-                .transition(.opacity.combined(with: .scale(scale: 0.98)))
-            }
-        }
+        ActiveGameplayView(
+            snapshot: snapshot,
+            displayMode: displayMode,
+            // Pause keyboard capture while the close prompt sheet is up so
+            // .keyboardShortcut(.cancelAction) / .defaultAction can reach
+            // SwiftUI and menu shortcuts like Cmd+W / Cmd+Q aren't eaten by
+            // the render surface's NSEvent monitor.
+            capturesKeyboardInput: snapshot.activeROM != nil && isClosePromptVisible == false,
+            surfaceChanged: surfaceChanged,
+            keyboardInputChanged: keyboardInputChanged,
+            pumpRuntimeEvents: pumpRuntimeEvents
+        )
+        .allowsHitTesting(isClosePromptVisible == false)
         .padding(14)
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
@@ -777,6 +755,7 @@ private struct GameplayShellView: View {
 private struct ActiveGameplayView: View {
     let snapshot: SessionSnapshot
     let displayMode: MainWindowDisplayMode
+    let capturesKeyboardInput: Bool
     let surfaceChanged: (RenderSurfaceDescriptor?) -> Void
     let keyboardInputChanged: (EmbeddedKeyboardEvent) -> Void
     let pumpRuntimeEvents: () -> Void
@@ -789,6 +768,7 @@ private struct ActiveGameplayView: View {
 
             RenderSurfaceView(
                 snapshot: snapshot,
+                capturesKeyboardInput: capturesKeyboardInput,
                 surfaceChanged: surfaceChanged,
                 keyboardInputChanged: keyboardInputChanged,
                 pumpRuntimeEvents: pumpRuntimeEvents

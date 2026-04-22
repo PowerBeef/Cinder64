@@ -5,6 +5,7 @@ import SwiftUI
 
 struct RenderSurfaceView: View {
     let snapshot: SessionSnapshot
+    let capturesKeyboardInput: Bool
     let surfaceChanged: (RenderSurfaceDescriptor?) -> Void
     let keyboardInputChanged: (EmbeddedKeyboardEvent) -> Void
     let pumpRuntimeEvents: () -> Void
@@ -14,7 +15,7 @@ struct RenderSurfaceView: View {
             RenderSurfaceHost(
                 surfaceChanged: surfaceChanged,
                 keyboardInputChanged: keyboardInputChanged,
-                capturesKeyboardInput: snapshot.activeROM != nil,
+                capturesKeyboardInput: capturesKeyboardInput,
                 pumpRuntimeEvents: pumpRuntimeEvents
             )
             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
