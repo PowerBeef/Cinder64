@@ -15,6 +15,14 @@ final class EmulationSession {
     private var deferredBootRenderSurface: RenderSurfaceDescriptor?
     private var pendingSurfaceWaiters: [UUID: CheckedContinuation<RenderSurfaceDescriptor, Never>]
     private var isPumpInFlight = false
+    private var lifecycle = RuntimeLifecycleStateMachine()
+
+    /// Internal lifecycle phase tracked alongside `snapshot.emulationState`.
+    /// Finer-grained than the five-case external state (includes
+    /// `readyPaused`, `stopping`, `disposed`) so future UI surfaces or
+    /// diagnostics can distinguish e.g. "waiting for Rust shutdown" from
+    /// "just paused". Read-only to the outside world.
+    var lifecycleState: RuntimeLifecycleState { lifecycle.state }
 
     init(
         coreHost: CoreHosting,
@@ -32,6 +40,22 @@ final class EmulationSession {
         self.pendingSurfaceWaiters = [:]
     }
 
+    /// Move the lifecycle machine forward. Invalid transitions are logged
+    /// as warnings (helpful for catching programming bugs early) and the
+    /// state is forced anyway, so the machine never gets wedged in a way
+    /// that would break user-visible snapshot-driven behavior.
+    private func advanceLifecycle(to next: RuntimeLifecycleState) {
+        do {
+            try lifecycle.transition(to: next)
+        } catch {
+            persistenceStore.logStore.record(
+                "warning",
+                "lifecycle transition rejected: \(error.localizedDescription)"
+            )
+            lifecycle.force(next)
+        }
+    }
+
     func openROM(url: URL) async throws {
         let romIdentity = try ROMIdentity.make(for: url)
         let settings = try persistenceStore.settingsStore.loadSettings(for: romIdentity) ?? .default
@@ -47,6 +71,7 @@ final class EmulationSession {
             activeSaveSlot: 0,
             warningBanner: nil
         )
+        advanceLifecycle(to: .booting)
 
         do {
             let renderSurface = await waitForValidRenderSurface()
@@ -60,7 +85,9 @@ final class EmulationSession {
             )
 
             _ = try await coreHost.openROM(at: url, configuration: configuration)
+            advanceLifecycle(to: .readyPaused)
             snapshot = try await coreHost.resume()
+            advanceLifecycle(to: .running)
             try await replayDeferredBootRenderSurfaceIfNeeded(initialDescriptor: renderSurface)
             try persistenceStore.recentGamesStore.recordLaunch(romIdentity)
             recentGames = try persistenceStore.recentGamesStore.loadRecords()
@@ -68,6 +95,7 @@ final class EmulationSession {
         } catch {
             deferredBootRenderSurface = nil
             snapshot = .idle
+            advanceLifecycle(to: .stopped)
             throw error
         }
     }
@@ -76,6 +104,7 @@ final class EmulationSession {
         do {
             try await coreHost.pause()
             snapshot.emulationState = .paused
+            advanceLifecycle(to: .paused)
         } catch {
             markRuntimeFailure(message: error.localizedDescription)
             throw error
@@ -85,6 +114,7 @@ final class EmulationSession {
     func resume() async throws {
         do {
             snapshot = try await coreHost.resume()
+            advanceLifecycle(to: .running)
         } catch {
             markRuntimeFailure(message: error.localizedDescription)
             throw error
@@ -221,15 +251,29 @@ final class EmulationSession {
     }
 
     func stop() async throws {
-        try await coreHost.stop()
-        deferredBootRenderSurface = nil
-        snapshot = .idle
+        advanceLifecycle(to: .stopping)
+        do {
+            try await coreHost.stop()
+            deferredBootRenderSurface = nil
+            snapshot = .idle
+            advanceLifecycle(to: .stopped)
+        } catch {
+            advanceLifecycle(to: .failed)
+            throw error
+        }
     }
 
     func dispose() async throws {
-        try await coreHost.dispose()
-        deferredBootRenderSurface = nil
-        snapshot = .idle
+        advanceLifecycle(to: .stopping)
+        do {
+            try await coreHost.dispose()
+            deferredBootRenderSurface = nil
+            snapshot = .idle
+            advanceLifecycle(to: .disposed)
+        } catch {
+            advanceLifecycle(to: .failed)
+            throw error
+        }
     }
 
     func updateRenderSurface(_ descriptor: RenderSurfaceDescriptor?) {
@@ -340,5 +384,6 @@ final class EmulationSession {
             title: "Emulation Stopped Unexpectedly",
             message: failureMessage
         )
+        advanceLifecycle(to: .failed)
     }
 }
