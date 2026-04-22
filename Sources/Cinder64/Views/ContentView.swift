@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
@@ -67,36 +68,112 @@ struct ContentView: View {
                 )
             }
         }
-        // Present both prompts as native macOS sheets. The earlier ZStack
-        // overlay approach was hidden behind the render surface's Metal
-        // layer — a known SwiftUI quirk where CAMetalLayer-backed
-        // NSViewRepresentable content composites above sibling SwiftUI
-        // views. Sheets are window-level and always appear on top.
-        .sheet(item: $closeGameCoordinator.closePrompt) { prompt in
-            CloseGamePromptCard(
-                prompt: prompt,
-                cancelRequested: closeGameCoordinator.cancelCloseGame,
-                closeWithoutSavingRequested: {
-                    Task { await closeGameCoordinator.closeWithoutSaving() }
-                },
-                saveAndCloseRequested: {
-                    Task { await closeGameCoordinator.saveAndClose() }
-                }
-            )
-            .frame(minWidth: 420, idealWidth: 460)
+        // Present both prompts as native NSAlert sheets. SwiftUI's
+        // `.sheet(item:)` silently fails to render above the embedded
+        // CAMetalLayer on the gameplay window — neither a ZStack overlay
+        // nor a SwiftUI sheet could cover the Metal content reliably. An
+        // NSAlert attached via beginSheetModal(for:) is window-level
+        // AppKit and always composites above the game, and its Return/Esc
+        // key handling is routed natively so the render surface's NSEvent
+        // monitor can't swallow it.
+        .onChange(of: closeGameCoordinator.closePrompt?.id) { _, newValue in
+            guard newValue != nil, let prompt = closeGameCoordinator.closePrompt else {
+                return
+            }
+            presentCloseGameAlert(for: prompt)
         }
-        .sheet(item: $closeGameCoordinator.resumePrompt) { prompt in
-            ResumeProtectedSavePromptCard(
-                prompt: prompt,
-                continueRequested: {
-                    completePendingProtectedLaunchRequested(true)
-                },
-                startFreshRequested: {
-                    completePendingProtectedLaunchRequested(false)
-                }
-            )
-            .frame(minWidth: 420, idealWidth: 460)
+        .onChange(of: closeGameCoordinator.resumePrompt?.id) { _, newValue in
+            guard newValue != nil, let prompt = closeGameCoordinator.resumePrompt else {
+                return
+            }
+            presentResumeAlert(for: prompt)
         }
+    }
+
+    @MainActor
+    private func presentCloseGameAlert(for prompt: CloseGamePromptState) {
+        let alert = NSAlert()
+        alert.messageText = "Close \(prompt.romDisplayName)?"
+        alert.informativeText = prompt.canSave
+            ? "Save a protected close-game checkpoint before leaving, or close without saving."
+            : "This session can't be saved right now, but you can still close the game or cancel."
+        alert.alertStyle = .warning
+
+        // NSAlert: first added button is default (Return), last is shown
+        // leftmost. We keep that convention — Save & Close becomes the
+        // default when available; Cancel is bound to Escape.
+        if prompt.canSave {
+            alert.addButton(withTitle: "Save & Close")
+        }
+        let withoutSavingButton = alert.addButton(withTitle: "Close Without Saving")
+        if #available(macOS 11.0, *) {
+            withoutSavingButton.hasDestructiveAction = true
+        }
+        let cancelButton = alert.addButton(withTitle: "Cancel")
+        cancelButton.keyEquivalent = "\u{1b}"
+
+        let canSave = prompt.canSave
+        let coordinator = closeGameCoordinator
+        let dispatch: @Sendable @MainActor (NSApplication.ModalResponse) -> Void = { response in
+            switch (canSave, response) {
+            case (true, .alertFirstButtonReturn):
+                Task { await coordinator.saveAndClose() }
+            case (true, .alertSecondButtonReturn), (false, .alertFirstButtonReturn):
+                Task { await coordinator.closeWithoutSaving() }
+            default:
+                coordinator.cancelCloseGame()
+            }
+        }
+
+        if let window = Self.presentationWindow() {
+            alert.beginSheetModal(for: window) { response in
+                Task { @MainActor in dispatch(response) }
+            }
+        } else {
+            dispatch(alert.runModal())
+        }
+    }
+
+    @MainActor
+    private func presentResumeAlert(for prompt: ResumeProtectedSavePromptState) {
+        let alert = NSAlert()
+        alert.messageText = "Resume \(prompt.romDisplayName)?"
+        alert.informativeText = "A protected close-game save is available. Continue from that checkpoint or start a fresh launch."
+        alert.alertStyle = .informational
+
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Start Fresh")
+        let cancelButton = alert.addButton(withTitle: "Cancel")
+        cancelButton.keyEquivalent = "\u{1b}"
+
+        let coordinator = closeGameCoordinator
+        let complete = completePendingProtectedLaunchRequested
+        let dispatch: @Sendable @MainActor (NSApplication.ModalResponse) -> Void = { response in
+            switch response {
+            case .alertFirstButtonReturn:
+                complete(true)
+            case .alertSecondButtonReturn:
+                complete(false)
+            default:
+                coordinator.dismissResumePrompt()
+            }
+        }
+
+        if let window = Self.presentationWindow() {
+            alert.beginSheetModal(for: window) { response in
+                Task { @MainActor in dispatch(response) }
+            }
+        } else {
+            dispatch(alert.runModal())
+        }
+    }
+
+    @MainActor
+    private static func presentationWindow() -> NSWindow? {
+        NSApp.keyWindow
+            ?? NSApp.mainWindow
+            ?? NSApp.windows.first(where: \.isVisible)
+            ?? NSApp.windows.first
     }
 }
 
