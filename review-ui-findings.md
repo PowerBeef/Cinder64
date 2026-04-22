@@ -5,7 +5,17 @@ _Scope: whole UI layer. Method: read every view/presentation/controller/service 
 
 ---
 
-## 1. Summary
+## Status update (post-Phase 1–3)
+
+All four compile errors (E1–E4) flagged in this report's original Section 4 are **resolved** in commit `98b6181` ("Fix four pre-existing compile errors blocking build on main"). The structural refactor that followed landed in three phases:
+
+- `cd1aa58` — **Phase 1**: SDL's Metal render surface moved to a dedicated `EmulatorDisplayWindow` child. Close-Game and Resume prompts restored to native SwiftUI `.sheet(item:)` on the main window — the force-quit issue reported by the user is resolved (verified end-to-end via Apple Event `quit` → sheet visible in CGWindowList at 470×151, buttons interactive).
+- `13468e5` — **Phase 2**: dropped the global `NSEvent.addLocalMonitorForEvents` monitor; keyboard input now flows through the child window's standard Cocoa responder chain. Menu shortcuts, `.keyboardShortcut(.defaultAction)` / `.cancelAction`, and Cmd+Q all work mid-game.
+- `b81d59b` — **Phase 3**: pump migrated from 60 Hz `Timer` to `NSView.displayLink(target:selector:)` (refresh-rate-matched, 60/120 Hz ProMotion). Deprecated `CVDisplayLink*` code deleted from `RuntimePumpCoordinator`.
+
+Full test suite green (82/82). `verify_launch_services_boot.sh` and `verify_full_boot.sh` green (render/present ≥ 280, vi ≥ 900, scripted-keys playback clean). The remainder of this document is kept as a historical record of the state before the refactor; inline status tags (**RESOLVED**) are added to each finding that's now addressed.
+
+## 1. Summary (original)
 
 **Overall verdict: the UI design is well considered and internally consistent, but the tree does not currently work as intended — it does not compile.** Three pre-existing compile errors on `main` (HEAD = `76e6d94`) prevent `swift test`, the `.app` bundle build, the boot verification scripts, and a live launch from running. The errors are not introduced by your uncommitted changes — they are protocol drift + a macOS 15 API-removal regression that shipped in the last merge. Your uncommitted work (shutdown-timeout hardening across Swift + Rust + tests) is coherent and well structured, but it can only be validated after the pre-existing breakage is fixed.
 
@@ -163,15 +173,15 @@ Reminder (per [CLAUDE.md](CLAUDE.md) and [script/verify_full_boot.sh:23-30](scri
 
 ### P0 — blockers for "works as intended"
 
-1. **Fix protocol drift (E1 + E2).** Decide whether `setKeyboardKey(scancode:pressed:)` or `enqueueKeyboardInput/releaseKeyboardInput` is the canonical shape, then migrate the other side. The protocol in [CoreContracts.swift:256-257](Sources/Cinder64/Models/CoreContracts.swift) and the call site in [EmulationSession.swift:188](Sources/Cinder64/Services/EmulationSession.swift) must agree with the host in [Gopher64CoreHost.swift:191](Sources/Cinder64/Services/Gopher64CoreHost.swift).
-2. **Reconcile `pumpEvents` async/sync (E3).** Protocol is `async`, host returns sync, caller invokes sync. Pick one. If protocol stays async, `EmulationSession.pumpRuntimeEvents` must become `async` and `RenderSurfaceHostingView.handleEventPumpTimer` needs a `Task { await ... }` wrapper or a switch to `NSView.displayLink` per E4.
-3. **Migrate `RuntimePumpCoordinator` off `CVDisplayLink` (E4).** `CVDisplayLink*` C-API is deprecated on macOS 15; the `deinit` with `.init(bitPattern: 0)!` cannot compile on the current SDK. Use `NSView.displayLink(target:selector:)` and let SwiftUI own its lifetime, or fall back fully to the `Timer` path that already exists. Also resolves the `@MainActor` / `Timer` callback warning on line 122.
+1. **Fix protocol drift (E1 + E2).** **RESOLVED** in `98b6181`: `Gopher64CoreHost` migrated to `enqueueKeyboardInput(_:)` + `releaseKeyboardInput()`; `EmulationSession.handleKeyboardInput` call site updated; held-scancode tracking added to the host.
+2. **Reconcile `pumpEvents` async/sync (E3).** **RESOLVED** in `98b6181` + `b81d59b`: host `pumpEvents` made async; `EmulationSession.pumpRuntimeEvents` wraps the call in a Task with `isPumpInFlight` serialization matching the test contract.
+3. **Migrate `RuntimePumpCoordinator` off `CVDisplayLink` (E4).** **RESOLVED** in `98b6181` (initial compile fix with `isolated deinit` SE-0371) + `b81d59b` (production pump migrated to `NSView.displayLink`; the `RuntimePumpCoordinator`'s CVDisplayLink path deleted entirely).
 
 ### P1 — improvements after unblocking
 
-4. **Unify toolbar/menu gating on `SessionToolbarActionAvailability`.** The command-group buttons in [Cinder64App.swift:79-91](Sources/Cinder64/App/Cinder64App.swift) duplicate the `.running`/`.paused` conditions rather than going through the presentation struct. A thin helper (`SessionToolbarPresentation.actionAvailability(for:).canPause` etc.) would keep the gating in one place and extend the test coverage automatically.
-5. **Hook `releaseKeyboardInput()` from the view.** Once E1/E2 are resolved, `RenderSurfaceHostingView` should call `keyboardInputChanged(.release)` (or similar) on `windowDidResignKey` / `viewWillMove(toWindow: nil)` so held keys don't stick when focus leaves the game — today it just removes the monitor ([RenderSurfaceView.swift:414-418](Sources/Cinder64/Views/RenderSurfaceView.swift)).
-6. **`SessionStatusStrip` is over-engineered for one item.** If you intend to grow it, good; otherwise simplify ([Cinder64Presentation.swift:254-264](Sources/Cinder64/Views/Cinder64Presentation.swift)).
+4. **Unify toolbar/menu gating on `SessionToolbarActionAvailability`.** Still open. The command-group buttons in [Cinder64App.swift](Sources/Cinder64/App/Cinder64App.swift) still duplicate the `.running`/`.paused` conditions directly rather than going through `SessionToolbarPresentation.actionAvailability(for:)`.
+5. **Hook `releaseKeyboardInput()` from the view.** **RESOLVED** in `13468e5` (Phase 2): `EmulatorDisplayController` observes `NSWindow.didResignKeyNotification` on the emulator child window and calls `session.releaseKeyboardInput()` so held scancodes are dropped whenever the emulator window loses key status (sheet opens, Cmd+Tab away, etc.).
+6. **`SessionStatusStrip` is over-engineered for one item.** Still open — minor polish.
 
 ### P2 — polish
 
