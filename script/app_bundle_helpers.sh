@@ -130,17 +130,65 @@ cinder64_window_info_for_pid() {
 import CoreGraphics
 import Foundation
 
-let pid = Int(CommandLine.arguments[1]) ?? -1
-let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-let pidWindows = windows.filter {
-    (($0[kCGWindowOwnerPID as String] as? Int) ?? -1) == pid &&
-    (($0[kCGWindowLayer as String] as? Int) ?? 1) == 0
+// The app hosts the embedded gopher64 Metal surface in a dedicated
+// borderless child window added as a child of the main window via
+// addChildWindow (see Sources/Cinder64/App/EmulatorDisplayWindow.swift).
+// It's part of the same app, not a separate user-facing window, so
+// boot verification should exclude it from the "visible window" count.
+//
+// We can't reliably filter by title — kCGWindowName requires screen
+// recording permission in macOS Ventura+ and returns nil otherwise —
+// so we detect the child geometrically: a window whose bounds are
+// entirely contained within another same-PID window is treated as
+// auxiliary. This matches the invariant that a gameplay-stage child
+// window always sits inside the main window's content area.
+struct WindowInfo {
+    let layer: Int
+    let rect: CGRect
+    let name: String
+    let raw: [String: Any]
 }
 
-print(pidWindows.count)
-for window in pidWindows {
-    let name = window[kCGWindowName as String] as? String ?? "untitled"
-    print(name)
+func rect(from info: [String: Any]) -> CGRect {
+    guard let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] else {
+        return .zero
+    }
+    return CGRect(
+        x: bounds["X"] ?? 0,
+        y: bounds["Y"] ?? 0,
+        width: bounds["Width"] ?? 0,
+        height: bounds["Height"] ?? 0
+    )
+}
+
+let pid = Int(CommandLine.arguments[1]) ?? -1
+let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+let pidWindows: [WindowInfo] = windows.compactMap { dict in
+    guard
+        (dict[kCGWindowOwnerPID as String] as? Int) == pid,
+        ((dict[kCGWindowLayer as String] as? Int) ?? 1) == 0
+    else { return nil }
+    return WindowInfo(
+        layer: (dict[kCGWindowLayer as String] as? Int) ?? 0,
+        rect: rect(from: dict),
+        name: (dict[kCGWindowName as String] as? String) ?? "untitled",
+        raw: dict
+    )
+}
+
+// A window is a child if another same-pid window strictly contains its
+// rect. Keep only top-level windows (those NOT contained by any other).
+let topLevel = pidWindows.filter { candidate in
+    guard candidate.rect.width > 0, candidate.rect.height > 0 else { return false }
+    return !pidWindows.contains { other in
+        guard other.rect != candidate.rect else { return false }
+        return other.rect.contains(candidate.rect)
+    }
+}
+
+print(topLevel.count)
+for window in topLevel {
+    print(window.name)
 }
 SWIFT
 }

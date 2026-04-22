@@ -8,6 +8,7 @@ struct Cinder64App: App {
     @State private var session: EmulationSession
     @State private var closeGameCoordinator: CloseGameCoordinator
     @State private var mainWindowController = MainWindowController()
+    @State private var emulatorDisplayController = EmulatorDisplayController()
 
     init() {
         do {
@@ -38,6 +39,7 @@ struct Cinder64App: App {
             ContentView(
                 session: session,
                 closeGameCoordinator: closeGameCoordinator,
+                emulatorDisplayController: emulatorDisplayController,
                 openROMRequested: { Task { await openROM() } },
                 returnHomeRequested: { closeGameCoordinator.requestCloseGame(.returnHome) },
                 completePendingProtectedLaunchRequested: { shouldResumeProtectedSave in
