@@ -5,7 +5,7 @@ import Testing
 struct RuntimePumpCoordinatorTests {
     @Test func blockedTicksCoalesceIntoASingleDeferredPump() {
         var pumpCount = 0
-        let coordinator = RuntimePumpCoordinator(useDisplayLink: false) {
+        let coordinator = RuntimePumpCoordinator {
             pumpCount += 1
         }
 
@@ -23,7 +23,7 @@ struct RuntimePumpCoordinatorTests {
 
     @Test func stoppingTheCoordinatorPreventsFurtherPumpRequests() {
         var pumpCount = 0
-        let coordinator = RuntimePumpCoordinator(useDisplayLink: false) {
+        let coordinator = RuntimePumpCoordinator {
             pumpCount += 1
         }
 

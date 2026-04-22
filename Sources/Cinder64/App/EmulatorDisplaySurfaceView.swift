@@ -6,10 +6,10 @@ import QuartzCore
 /// EmulatorDisplayWindow, not the main SwiftUI window.
 ///
 /// Owns: the Metal backing layer, the render-surface descriptor
-/// publication pipeline, the event-pump timer, the keyboard event chain,
-/// and (temporarily) the global NSEvent monitor that forwards mapped
-/// scancodes into the embedded runtime. Phase 2 removes the global
-/// monitor in favor of window-scoped first-responder handling.
+/// publication pipeline, the per-frame pump driver (CADisplayLink
+/// bound to this view's screen via NSView.displayLink(target:selector:),
+/// automatically refresh-rate-matched for ProMotion), and the scoped
+/// keyDown/keyUp/flagsChanged event chain.
 @MainActor
 final class EmulatorDisplaySurfaceView: NSView {
     private static let logger = Logger(
@@ -22,7 +22,7 @@ final class EmulatorDisplaySurfaceView: NSView {
     var keyboardInputChanged: (EmbeddedKeyboardEvent) -> Void = { _ in }
     var pumpRuntimeEvents: () -> Void = {}
 
-    private var eventPumpTimer: Timer?
+    private var pumpDisplayLink: CADisplayLink?
     private var lastCommittedDescriptor: RenderSurfaceDescriptor?
     private var lastDeferredRevision: UInt64?
     private var eventPumpDeferredForLiveResize = false
@@ -250,22 +250,21 @@ final class EmulatorDisplaySurfaceView: NSView {
     }
 
     private func configureEventPumpIfNeeded() {
-        guard eventPumpTimer == nil else { return }
+        guard pumpDisplayLink == nil else { return }
 
-        let timer = Timer(
-            timeInterval: 1.0 / 60.0,
-            target: self,
-            selector: #selector(handleEventPumpTimer(_:)),
-            userInfo: nil,
-            repeats: true
-        )
-        RunLoop.main.add(timer, forMode: .common)
-        eventPumpTimer = timer
+        // NSView.displayLink(target:selector:) returns a CADisplayLink
+        // whose cadence automatically matches the refresh rate of the
+        // screen this view is currently on — 60 Hz on standard displays,
+        // 120 Hz on ProMotion. Replaces the earlier 60 Hz Timer and
+        // avoids the deprecated CVDisplayLink family entirely.
+        let link = displayLink(target: self, selector: #selector(handleEventPumpTick(_:)))
+        link.add(to: .main, forMode: .common)
+        pumpDisplayLink = link
     }
 
     private func invalidateEventPump() {
-        eventPumpTimer?.invalidate()
-        eventPumpTimer = nil
+        pumpDisplayLink?.invalidate()
+        pumpDisplayLink = nil
     }
 
     private func focusHostForKeyboardInput() {
@@ -308,7 +307,7 @@ final class EmulatorDisplaySurfaceView: NSView {
         }
     }
 
-    @objc private func handleEventPumpTimer(_: Timer) {
+    @objc private func handleEventPumpTick(_: CADisplayLink) {
         if inLiveResize {
             eventPumpDeferredForLiveResize = true
             return
