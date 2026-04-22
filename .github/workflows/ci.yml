@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift-test:
+    name: swift test
+    runs-on: macos-15
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full checkout so the vendored ThirdParty/gopher64 submodule-ish
+          # tree is visible to swift build. Cinder64 does not currently
+          # use git submodules (gopher64 is copied in-tree), but keep the
+          # fetch deep enough that future submodule adoption works.
+          fetch-depth: 1
+
+      - name: Print tool versions
+        run: |
+          swift --version
+          xcodebuild -version
+          rustc --version || true
+          cargo --version || true
+
+      - name: swift test
+        run: swift test
+
+      - name: Bash helper tests
+        run: ./script/test_app_bundle_helpers.sh
+
+  bundle-assembly:
+    name: bundle assembly smoke
+    runs-on: macos-15
+    timeout-minutes: 30
+    # MoltenVK / libpng / freetype aren't installed on the runner by
+    # default. Install via Homebrew and expose paths via the env vars
+    # BundledGopher64RuntimeLocator respects so the bundler can find
+    # them without brew --prefix lookups at build time.
+    needs: swift-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: |
+          brew install molten-vk freetype libpng
+
+      - name: Prepare .app bundle (no launch)
+        # --prepare --print-bundle-path builds the Rust bridge (release),
+        # swift build, assembles dist/runs/<timestamp>/Cinder64.app,
+        # rewrites dylib paths + codesigns, validates, and prints the
+        # bundle path. This is the same path verify_launch_services_boot.sh
+        # uses internally, minus the ROM launch.
+        run: |
+          ./script/build_and_run.sh --prepare --print-bundle-path
+
+      - name: Verify bundle structure
+        run: |
+          BUNDLE="dist/Cinder64.app"
+          test -x "$BUNDLE/Contents/MacOS/Cinder64" || { echo "missing executable"; exit 1; }
+          for dylib in libcinder64_gopher64.dylib libMoltenVK.dylib libfreetype.6.dylib libpng16.16.dylib; do
+            test -f "$BUNDLE/Contents/Frameworks/$dylib" || { echo "missing $dylib"; exit 1; }
+          done
+          codesign --verify --deep --strict "$BUNDLE"
+          codesign --display --requirements - "$BUNDLE"
