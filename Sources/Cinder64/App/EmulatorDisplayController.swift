@@ -63,6 +63,28 @@ final class EmulatorDisplayController {
         window.makeKeyAndOrderFront(nil)
     }
 
+    /// Toggle the emulator display window's on-screen presence without
+    /// detaching it as a child window. Used to get the (`.floating`)
+    /// child window out of the way while a SwiftUI sheet is presented
+    /// on the main window — otherwise the child composites above the
+    /// sheet in screen z-order and intercepts mouse events in the
+    /// area the sheet buttons occupy, even though the sheet renders
+    /// visually on top.
+    ///
+    /// When hidden: `orderOut(nil)` keeps the child-window
+    /// parent/child relationship intact, so re-showing is a simple
+    /// `orderFront` triggered via updateFrame.
+    func setContentVisible(_ visible: Bool) {
+        if visible {
+            guard isAttached else { return }
+            updateFrame()
+        } else {
+            if window.isVisible {
+                window.orderOut(nil)
+            }
+        }
+    }
+
     /// Attach the emulator display window as a child of the anchor's
     /// window and start tracking the anchor's screen rect.
     func attach(to anchor: NSView) {
