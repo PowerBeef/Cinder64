@@ -99,11 +99,9 @@ struct ContentView: View {
             .frame(minWidth: 420, idealWidth: 460)
         }
         // Hide the emulator child window while any prompt sheet is
-        // visible. The child window sits at .floating level above the
-        // main window's .normal-level sheet, so without this the
-        // sheet renders on top but mouse events land on the emulator
-        // and the sheet buttons feel unresponsive. Re-show when the
-        // prompt dismisses.
+        // visible. The child window would otherwise composite above
+        // the main window's sheet area and (even with
+        // ignoresMouseEvents) cause visual occlusion in that region.
         .onChange(of: isAnyPromptVisible) { _, showingPrompt in
             emulatorDisplayController.setContentVisible(showingPrompt == false)
         }

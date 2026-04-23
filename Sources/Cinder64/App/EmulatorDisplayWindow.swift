@@ -40,8 +40,20 @@ final class EmulatorDisplayWindow: NSWindow {
         isOpaque = true
         hasShadow = false
         backgroundColor = .black
-        ignoresMouseEvents = false
-        acceptsMouseMovedEvents = true
+        // Critical: the emulator child window passes mouse events
+        // through to windows below it. If we left this false, mouse
+        // clicks on the main window's toolbar, menu bar items
+        // reached via first-responder routing, and any SwiftUI
+        // button placed where the emulator geometrically overlaps
+        // would all be silently eaten by this child window even
+        // though addChildWindow keeps it visually locked above the
+        // anchor view. Keyboard input reaches the running ROM via
+        // the gated NSEvent local monitor installed in Cinder64App
+        // (installGameKeyboardMonitor), so this window never needs
+        // to receive mouse events itself — they should always flow
+        // to the main SwiftUI window.
+        ignoresMouseEvents = true
+        acceptsMouseMovedEvents = false
         collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
         // Use the floating level so the CG window layer is non-zero —
         // boot-verification scripts and any other `kCGWindowLayer == 0`
