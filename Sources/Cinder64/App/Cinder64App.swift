@@ -168,11 +168,15 @@ struct Cinder64App: App {
         }
         reactivateMainWindow()
         mainWindowController.apply(mode: MainWindowDisplayMode(settings: session.activeSettings))
-        // After a successful ROM boot, hand keyboard focus to the
-        // emulator display window so the user can start playing
-        // immediately — without this, input routing would stay on the
-        // main window until the user clicks into the gameplay stage.
-        emulatorDisplayController.makeKey()
+        // Deliberately do NOT make the emulator display window key on
+        // ROM boot. If we did, the main SwiftUI window would no longer
+        // be key and first-click on the gameplay toolbar would be
+        // consumed as an activation click instead of firing the button
+        // action (SwiftUI .toolbar items don't accept first-mouse).
+        // The user clicks into the gameplay frame when they're ready
+        // to play — EmulatorDisplaySurfaceView.mouseDown claims key
+        // status there, so keyboard input starts flowing on first
+        // click into the stage rather than the app startup.
         startScriptedKeyPlaybackIfNeeded()
     }
 
