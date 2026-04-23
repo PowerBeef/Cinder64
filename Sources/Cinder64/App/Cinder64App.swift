@@ -241,12 +241,58 @@ struct Cinder64App: App {
         appDelegate.reopenTrackedMainWindow = {
             mainWindowController.reopenTrackedWindowIfNeeded()
         }
+        installGameKeyboardMonitor()
         // When the emulator display window loses key status — e.g.
         // because a close-game sheet opens on the main window, another
         // app steals focus, or the user Cmd+Tabs away — drop every
         // held scancode in the embedded runtime so keys don't stick.
         emulatorDisplayController.onKeyboardFocusLost = {
             session.releaseKeyboardInput()
+        }
+    }
+
+    /// Install a local NSEvent monitor that forwards gameplay key
+    /// events to `session.handleKeyboardInput` while the main SwiftUI
+    /// window stays key at all times. Without this we would either
+    /// (a) have to make the emulator child window key — which breaks
+    /// first-click-on-toolbar because SwiftUI .toolbar items don't
+    /// accept first-mouse — or (b) never route keys to the running
+    /// ROM at all.
+    ///
+    /// The monitor is deliberately narrow:
+    ///  * only runs when the runtime is actively playable,
+    ///  * never eats events with Cmd / Ctrl / Option modifiers (menu
+    ///    + SwiftUI-shortcut chords stay intact),
+    ///  * never eats anything while a prompt sheet is visible (so
+    ///    Return / Esc continue to trigger .defaultAction /
+    ///    .cancelAction on the prompt buttons),
+    ///  * never eats events whose keyCode isn't in the gameplay
+    ///    scancode map (so unrelated keys flow through normally).
+    private func installGameKeyboardMonitor() {
+        NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .keyUp, .flagsChanged]
+        ) { [session, closeGameCoordinator] event in
+            let state = session.snapshot.emulationState
+            guard state == .running || state == .paused else { return event }
+
+            // Leave shortcut chords alone.
+            let blockingModifiers: NSEvent.ModifierFlags = [.command, .control, .option]
+            if event.modifierFlags.intersection(blockingModifiers).isEmpty == false {
+                return event
+            }
+
+            // Leave prompt-sheet key routing alone.
+            if closeGameCoordinator.closePrompt != nil
+                || closeGameCoordinator.resumePrompt != nil {
+                return event
+            }
+
+            guard let kbEvent = EmbeddedKeyboardScancodeMap.keyboardEvent(from: event) else {
+                return event
+            }
+
+            session.handleKeyboardInput(kbEvent)
+            return nil
         }
     }
 

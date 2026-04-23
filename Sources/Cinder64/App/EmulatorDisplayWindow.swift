@@ -18,7 +18,15 @@ final class EmulatorDisplayWindow: NSWindow {
     /// UI because the window is borderless.
     static let windowTitle = "Cinder64 Emulator"
 
-    override var canBecomeKey: Bool { true }
+    // The emulator child window never becomes key. Keeping the main
+    // SwiftUI window as the permanent key window means toolbar
+    // buttons, menu shortcuts, and SwiftUI .keyboardShortcut all fire
+    // on first click/keystroke — we don't run into macOS's
+    // first-mouse activation behavior when the user alternates
+    // between the gameplay frame and the toolbar. Keyboard input
+    // still reaches the emulator via a gated NSEvent local monitor
+    // installed by Cinder64App (see installGameKeyboardMonitor).
+    override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
     init(contentRect: NSRect) {

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 struct EmbeddedKeyboardEvent: Equatable, Sendable {
@@ -31,6 +32,46 @@ enum EmbeddedKeyboardScancodeMap {
         case 126: 82   // Up Arrow
         default:
             nil
+        }
+    }
+
+    /// Translate a Cocoa key event (keyDown / keyUp / flagsChanged)
+    /// into an `EmbeddedKeyboardEvent` suitable for forwarding into
+    /// `EmulationSession.handleKeyboardInput(_:)`. Returns `nil` when
+    /// the event's key isn't part of the gameplay scancode map, or
+    /// when it's a key-repeat (macOS emits held-key repeats while the
+    /// N64 controller input state is already "held" from the first
+    /// press, so repeats would double-enqueue).
+    static func keyboardEvent(from event: NSEvent) -> EmbeddedKeyboardEvent? {
+        switch event.type {
+        case .flagsChanged:
+            guard let scancode = scancode(forMacKeyCode: event.keyCode) else {
+                return nil
+            }
+
+            let isPressed = switch event.keyCode {
+            case 56, 60:
+                event.modifierFlags.contains(.shift)
+            case 59, 62:
+                event.modifierFlags.contains(.control)
+            default:
+                false
+            }
+
+            return EmbeddedKeyboardEvent(scancode: scancode, isPressed: isPressed)
+        case .keyDown:
+            guard event.isARepeat == false else {
+                return nil
+            }
+            fallthrough
+        case .keyUp:
+            guard let scancode = scancode(forMacKeyCode: event.keyCode) else {
+                return nil
+            }
+
+            return EmbeddedKeyboardEvent(scancode: scancode, isPressed: event.type == .keyDown)
+        default:
+            return nil
         }
     }
 }

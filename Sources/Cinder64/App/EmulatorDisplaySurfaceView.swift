@@ -89,21 +89,11 @@ final class EmulatorDisplaySurfaceView: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
-        // Claim key status so subsequent keyDown/keyUp/flagsChanged
-        // events route through this window's responder chain.
-        // focusHostForKeyboardInput only sets the first responder
-        // within the window — without makeKeyAndOrderFront the
-        // keyboard events never reach this view because AppKit
-        // delivers keys to the key window's first responder, not to
-        // an arbitrary responder in a non-key child window.
-        //
-        // Pairing this with the removal of launchROM's makeKey call
-        // (see Cinder64App.launchROM) means: main window stays key on
-        // ROM boot so toolbar clicks fire on first click; clicking
-        // into the gameplay frame then transfers key status here and
-        // keyboard input starts flowing.
-        window?.makeKeyAndOrderFront(nil)
-        focusHostForKeyboardInput()
+        // Deliberately do NOT claim key status here. The emulator
+        // window has canBecomeKey = false so the main SwiftUI window
+        // stays key across gameplay + toolbar interactions; keyboard
+        // input reaches the running ROM via the gated NSEvent local
+        // monitor installed in Cinder64App.installGameKeyboardMonitor.
         super.mouseDown(with: event)
     }
 
