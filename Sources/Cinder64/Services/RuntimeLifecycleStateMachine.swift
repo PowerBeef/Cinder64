@@ -38,13 +38,19 @@ struct RuntimeLifecycleStateMachine: Sendable {
     }
 
     private static let allowedTransitions: [RuntimeLifecycleState: Set<RuntimeLifecycleState>] = [
-        .stopped: [.booting, .disposed],
+        // stopping from stopped is idempotent: cleanup hooks
+        // (windowWillClose, applicationShouldTerminate) may fire when
+        // there's nothing to stop, so treat it as a no-op rather than
+        // a logged warning.
+        .stopped: [.stopping, .booting, .disposed],
         .booting: [.readyPaused, .stopping, .failed, .stopped],
         .readyPaused: [.running, .stopping, .failed, .stopped],
         .running: [.paused, .stopping, .failed, .stopped],
         .paused: [.running, .stopping, .failed, .stopped],
         .stopping: [.stopped, .failed, .disposed],
         .failed: [.stopping, .stopped, .disposed, .booting],
-        .disposed: [.stopped],
+        // Allow booting from disposed — the app can load a new ROM
+        // after a prior session was torn down.
+        .disposed: [.stopped, .booting, .stopping],
     ]
 }
