@@ -8,6 +8,7 @@ final class MainWindowController: NSObject, NSWindowDelegate {
     var shouldInterceptWindowClose: (() -> Bool)?
     var requestCloseGameForWindowClose: (() -> Void)?
     var onTrackedWindowWillClose: (() -> Void)?
+    var onTrackedWindowChanged: ((NSWindow?) -> Void)?
     private var allowsNextWindowClose = false
 
     func bind(window: NSWindow) {
@@ -20,6 +21,7 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             )
         }
         self.window = window
+        onTrackedWindowChanged?(window)
         window.collectionBehavior.insert(.fullScreenPrimary)
         window.isRestorable = MainWindowLaunchPresentation.restoresPreviousWindowState
         if MainWindowLaunchPresentation.restoresPreviousWindowState == false {
@@ -152,6 +154,7 @@ final class MainWindowController: NSObject, NSWindowDelegate {
 
         onTrackedWindowWillClose?()
         window = nil
+        onTrackedWindowChanged?(nil)
     }
 }
 

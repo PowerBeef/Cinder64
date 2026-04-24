@@ -2,67 +2,43 @@ import Foundation
 import Testing
 @testable import Cinder64
 
-/// Confirms EmulationSession drives the internal
-/// RuntimeLifecycleStateMachine as it walks through the ROM lifecycle,
-/// including the fine-grained phases (`readyPaused`, `stopping`,
-/// `disposed`) that the user-facing `SessionSnapshot.emulationState`
-/// enum doesn't distinguish.
 @MainActor
+@Suite
 struct EmulationSessionLifecycleTests {
-    @Test func lifecycleStartsStopped() {
-        let harness = try! LifecyclePersistenceHarness()
+    @Test func lifecycleStartsStopped() throws {
+        let persistence = try PersistenceFixture(prefix: "cinder64-lifecycle")
         let session = EmulationSession(
-            coreHost: LifecycleFakeCoreHost(),
-            persistenceStore: harness.persistence
+            coreHost: CoreHostSpy(),
+            persistenceStore: persistence.persistence
         )
 
         #expect(session.lifecycleState == RuntimeLifecycleState.stopped)
     }
 
     @Test func openingAROMTransitionsThroughBootingReadyPausedRunning() async throws {
-        let harness = try LifecyclePersistenceHarness()
-        let core = LifecycleFakeCoreHost()
+        let persistence = try PersistenceFixture(prefix: "cinder64-lifecycle")
+        let core = CoreHostSpy()
         let session = EmulationSession(
             coreHost: core,
-            persistenceStore: harness.persistence
+            persistenceStore: persistence.persistence
         )
-
-        let romURL = harness.directory.appending(path: "Pilotwings 64.z64")
-        try Data("rom".utf8).write(to: romURL)
-        session.updateRenderSurface(
-            RenderSurfaceDescriptor(
-                windowHandle: 0xABCD,
-                viewHandle: 0xEF01,
-                width: 1280,
-                height: 720,
-                backingScaleFactor: 2
-            )
-        )
+        let romURL = try ROMFixture.writeROM(named: "Pilotwings 64.z64", in: persistence.directory)
+        session.updateRenderSurface(.testSurface())
 
         try await session.openROM(url: romURL)
 
         #expect(session.lifecycleState == RuntimeLifecycleState.running)
-        #expect(core.recordedStates == [.booting, .readyPaused, .running])
+        #expect(core.recordedLifecycleStates == [.booting, .readyPaused, .running])
     }
 
     @Test func stopTransitionsThroughStoppingToStopped() async throws {
-        let harness = try LifecyclePersistenceHarness()
+        let persistence = try PersistenceFixture(prefix: "cinder64-lifecycle")
         let session = EmulationSession(
-            coreHost: LifecycleFakeCoreHost(),
-            persistenceStore: harness.persistence
+            coreHost: CoreHostSpy(),
+            persistenceStore: persistence.persistence
         )
-
-        let romURL = harness.directory.appending(path: "Extreme-G.z64")
-        try Data("rom".utf8).write(to: romURL)
-        session.updateRenderSurface(
-            RenderSurfaceDescriptor(
-                windowHandle: 0xABCD,
-                viewHandle: 0xEF01,
-                width: 1280,
-                height: 720,
-                backingScaleFactor: 2
-            )
-        )
+        let romURL = try ROMFixture.writeROM(named: "Extreme-G.z64", in: persistence.directory)
+        session.updateRenderSurface(.testSurface())
 
         try await session.openROM(url: romURL)
         try await session.stop()
@@ -71,8 +47,8 @@ struct EmulationSessionLifecycleTests {
     }
 
     @Test func stopSwallowsShutdownErrorAndSurfacesWarningBanner() async throws {
-        let harness = try LifecyclePersistenceHarness()
-        let core = LifecycleFakeCoreHost()
+        let persistence = try PersistenceFixture(prefix: "cinder64-lifecycle")
+        let core = CoreHostSpy()
         core.stopError = NSError(
             domain: "test",
             code: 42,
@@ -80,23 +56,12 @@ struct EmulationSessionLifecycleTests {
         )
         let session = EmulationSession(
             coreHost: core,
-            persistenceStore: harness.persistence
+            persistenceStore: persistence.persistence
         )
-
-        let romURL = harness.directory.appending(path: "Lylat Wars.z64")
-        try Data("rom".utf8).write(to: romURL)
-        session.updateRenderSurface(
-            RenderSurfaceDescriptor(
-                windowHandle: 0xABCD,
-                viewHandle: 0xEF01,
-                width: 1280,
-                height: 720,
-                backingScaleFactor: 2
-            )
-        )
+        let romURL = try ROMFixture.writeROM(named: "Lylat Wars.z64", in: persistence.directory)
+        session.updateRenderSurface(.testSurface())
 
         try await session.openROM(url: romURL)
-        // Must not throw even though the underlying core host errored.
         try await session.stop()
 
         #expect(session.lifecycleState == RuntimeLifecycleState.stopped)
@@ -106,118 +71,60 @@ struct EmulationSessionLifecycleTests {
     }
 
     @Test func runtimeFailureTransitionsToFailed() async throws {
-        let harness = try LifecyclePersistenceHarness()
-        let core = LifecycleFakeCoreHost()
+        let persistence = try PersistenceFixture(prefix: "cinder64-lifecycle")
+        let core = CoreHostSpy()
         let session = EmulationSession(
             coreHost: core,
-            persistenceStore: harness.persistence
+            persistenceStore: persistence.persistence
         )
-
-        let romURL = harness.directory.appending(path: "Wave Race 64.z64")
-        try Data("rom".utf8).write(to: romURL)
-        session.updateRenderSurface(
-            RenderSurfaceDescriptor(
-                windowHandle: 0xABCD,
-                viewHandle: 0xEF01,
-                width: 1280,
-                height: 720,
-                backingScaleFactor: 2
-            )
-        )
+        let romURL = try ROMFixture.writeROM(named: "Wave Race 64.z64", in: persistence.directory)
+        session.updateRenderSurface(.testSurface())
 
         try await session.openROM(url: romURL)
         core.nextPumpEvent = .runtimeTerminated("runtime crashed")
         session.pumpRuntimeEvents()
-        await Task.yield()
+        await yieldToQueuedTasks()
 
         #expect(session.lifecycleState == RuntimeLifecycleState.failed)
     }
 }
 
-@MainActor
-private final class LifecycleFakeCoreHost: CoreHosting {
-    private(set) var recordedStates: [RuntimeLifecycleState] = []
-    var nextPumpEvent: CoreRuntimeEvent?
-    var stopError: Error?
-
-    private var lastIdentity: ROMIdentity?
-
-    func openROM(at url: URL, configuration: CoreHostConfiguration) async throws -> SessionSnapshot {
-        let identity = try ROMIdentity.make(for: url)
-        lastIdentity = identity
-        recordedStates.append(.booting)
-        return SessionSnapshot(
-            emulationState: .paused,
-            activeROM: identity,
-            rendererName: "LifecycleFake",
-            fps: 60,
-            videoMode: .windowed,
-            audioMuted: false,
-            activeSaveSlot: 0,
-            warningBanner: nil
+extension RenderSurfaceDescriptor {
+    static func testSurface(
+        windowHandle: UInt = 0xABCDABCD,
+        viewHandle: UInt = 0xFACADE,
+        width: Int = 1280,
+        height: Int = 720,
+        backingScaleFactor: Double = 2
+    ) -> RenderSurfaceDescriptor {
+        RenderSurfaceDescriptor(
+            windowHandle: windowHandle,
+            viewHandle: viewHandle,
+            width: width,
+            height: height,
+            backingScaleFactor: backingScaleFactor
         )
     }
-
-    func updateRenderSurface(_ descriptor: RenderSurfaceDescriptor) async throws {}
-
-    func pumpEvents() async -> CoreRuntimeEvent? {
-        defer { nextPumpEvent = nil }
-        return nextPumpEvent
-    }
-
-    func pause() async throws {}
-
-    func resume() async throws -> SessionSnapshot {
-        recordedStates.append(.readyPaused)
-        recordedStates.append(.running)
-        return SessionSnapshot(
-            emulationState: .running,
-            activeROM: lastIdentity,
-            rendererName: "LifecycleFake",
-            fps: 60,
-            videoMode: .windowed,
-            audioMuted: false,
-            activeSaveSlot: 0,
-            warningBanner: nil
-        )
-    }
-
-    func reset() async throws {}
-    func saveState(slot: Int) async throws {}
-    func saveProtectedCloseState(slot: Int) async throws {}
-    func loadState(slot: Int) async throws {}
-    func loadProtectedCloseState(slot: Int) async throws {}
-    func updateSettings(_ settings: CoreUserSettings) async throws {}
-    func updateInputMapping(_ mapping: InputMappingProfile) async throws {}
-    func enqueueKeyboardInput(_ event: EmbeddedKeyboardEvent) async throws {}
-    func releaseKeyboardInput() async throws {}
-
-    func stop() async throws {
-        if let stopError {
-            throw stopError
-        }
-    }
-
-    func dispose() async throws {}
 }
 
 @MainActor
-private struct LifecyclePersistenceHarness {
-    let directory: URL
-    let persistence: PersistenceStore
-
-    init() throws {
-        directory = FileManager.default
-            .temporaryDirectory
-            .appending(path: "cinder64-lifecycle-\(UUID().uuidString)", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        persistence = PersistenceStore(
-            recentGamesStore: RecentGamesStore(
-                storageURL: directory.appending(path: "recent-games.json")
-            ),
-            saveStateStore: SaveStateMetadataStore(
-                storageURL: directory.appending(path: "savestate-metadata.json")
-            )
-        )
+func yieldToQueuedTasks(count: Int = 3) async {
+    for _ in 0..<count {
+        await Task.yield()
     }
+}
+
+@MainActor
+func waitForCondition(
+    _ description: String,
+    timeoutIterations: Int = 1_000,
+    condition: () -> Bool
+) async {
+    for _ in 0..<timeoutIterations {
+        if condition() {
+            return
+        }
+        await Task.yield()
+    }
+    Issue.record("Timed out waiting for \(description)")
 }

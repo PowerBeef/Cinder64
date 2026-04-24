@@ -2,11 +2,12 @@ import Foundation
 import Testing
 @testable import Cinder64
 
+@Suite
 struct PerGameSettingsStoreTests {
     @Test func migratesLegacyMupenRendererSettingsToGopherDefaults() throws {
-        let harness = try TemporaryDirectoryHarness()
+        let temporaryDirectory = try TemporaryDirectoryFixture()
         let identity = makeIdentity(name: "Wave Race 64")
-        let storageURL = harness.directory.appending(path: "per-game-settings.json")
+        let storageURL = temporaryDirectory.url("per-game-settings.json")
         let legacyJSON = """
         {
           "\(identity.id)" : {

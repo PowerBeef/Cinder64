@@ -8,14 +8,13 @@ import SwiftUI
 /// SDL/MoltenVK side effects and sheets/alerts presented on the main
 /// window work correctly.
 ///
-/// Callbacks (surface publication, keyboard, pump) are wired directly
+/// Callbacks (surface publication, pump) are wired directly
 /// onto `controller.surfaceView` so the child window's NSView is the
-/// single source of truth for per-session input/output plumbing.
+/// single source of truth for per-session output plumbing.
 struct RenderSurfaceView: View {
     let snapshot: SessionSnapshot
     let controller: EmulatorDisplayController
     let surfaceChanged: (RenderSurfaceDescriptor?) -> Void
-    let keyboardInputChanged: (EmbeddedKeyboardEvent) -> Void
     let pumpRuntimeEvents: () -> Void
 
     var body: some View {
@@ -40,7 +39,6 @@ struct RenderSurfaceView: View {
     private func wireSurfaceCallbacks() {
         let surfaceView = controller.surfaceView
         surfaceView.surfaceChanged = surfaceChanged
-        surfaceView.keyboardInputChanged = keyboardInputChanged
         surfaceView.pumpRuntimeEvents = pumpRuntimeEvents
     }
 }

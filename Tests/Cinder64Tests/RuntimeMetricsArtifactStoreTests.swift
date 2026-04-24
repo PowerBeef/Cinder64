@@ -2,14 +2,11 @@ import Foundation
 import Testing
 @testable import Cinder64
 
+@Suite
 struct RuntimeMetricsArtifactStoreTests {
     @Test func writesMetricsArtifactsUnderTheAppSupportRoot() throws {
-        let harness = try TemporaryDirectoryHarness()
-        let logURL = harness.directory
-            .appending(path: "app-support", directoryHint: .isDirectory)
-            .appending(path: "logs", directoryHint: .isDirectory)
-            .appending(path: "runtime.log")
-        let store = RuntimeMetricsArtifactStore(logStore: LogStore(logFileURL: logURL))
+        let persistence = try PersistenceFixture()
+        let store = RuntimeMetricsArtifactStore(logStore: persistence.persistence.logStore)
 
         store.update { artifact in
             artifact.startupPhases = ["open-requested", "rom-opened"]
@@ -21,10 +18,7 @@ struct RuntimeMetricsArtifactStoreTests {
             artifact.lastStructuredError = RuntimeMetricsArtifactError(message: "test-error")
         }
 
-        let metricsURL = harness.directory
-            .appending(path: "app-support", directoryHint: .isDirectory)
-            .appending(path: "metrics.json")
-        let data = try Data(contentsOf: metricsURL)
+        let data = try Data(contentsOf: persistence.metricsURL)
         let artifact = try JSONDecoder.iso8601.decode(RuntimeMetricsArtifact.self, from: data)
 
         #expect(artifact.startupPhases == ["open-requested", "rom-opened"])

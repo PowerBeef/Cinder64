@@ -9,6 +9,7 @@ struct Cinder64App: App {
     @State private var closeGameCoordinator: CloseGameCoordinator
     @State private var mainWindowController = MainWindowController()
     @State private var emulatorDisplayController = EmulatorDisplayController()
+    @State private var gameplayKeyboardMonitorCoordinator = GameplayKeyboardMonitorCoordinator()
 
     init() {
         do {
@@ -40,6 +41,7 @@ struct Cinder64App: App {
                 session: session,
                 closeGameCoordinator: closeGameCoordinator,
                 emulatorDisplayController: emulatorDisplayController,
+                gameplayKeyboardMonitorCoordinator: gameplayKeyboardMonitorCoordinator,
                 openROMRequested: { Task { await openROM() } },
                 returnHomeRequested: { closeGameCoordinator.requestCloseGame(.returnHome) },
                 completePendingProtectedLaunchRequested: { shouldResumeProtectedSave in
@@ -128,7 +130,7 @@ struct Cinder64App: App {
 
     private func handleLaunchRequest(_ url: URL) async {
         do {
-            switch try closeGameCoordinator.prepareLaunchRequest(for: url) {
+            switch try await closeGameCoordinator.prepareLaunchRequest(for: url) {
             case .launchNormally:
                 try await launchROM(url: url, loadProtectedCloseSave: false)
             case .promptForProtectedResume:
@@ -168,15 +170,10 @@ struct Cinder64App: App {
         }
         reactivateMainWindow()
         mainWindowController.apply(mode: MainWindowDisplayMode(settings: session.activeSettings))
-        // Deliberately do NOT make the emulator display window key on
-        // ROM boot. If we did, the main SwiftUI window would no longer
-        // be key and first-click on the gameplay toolbar would be
-        // consumed as an activation click instead of firing the button
-        // action (SwiftUI .toolbar items don't accept first-mouse).
-        // The user clicks into the gameplay frame when they're ready
-        // to play — EmulatorDisplaySurfaceView.mouseDown claims key
-        // status there, so keyboard input starts flowing on first
-        // click into the stage rather than the app startup.
+        // Deliberately keep the main SwiftUI window key on ROM boot.
+        // Gameplay keys are scoped by GameplayKeyboardMonitorCoordinator
+        // so toolbar buttons, menu shortcuts, and prompt sheets keep
+        // normal AppKit focus behavior.
         startScriptedKeyPlaybackIfNeeded()
     }
 
@@ -225,9 +222,13 @@ struct Cinder64App: App {
             closeGameCoordinator.requestCloseGame(.closeWindow)
         }
         mainWindowController.onTrackedWindowWillClose = {
+            gameplayKeyboardMonitorCoordinator.updateTrackedWindow(nil)
             Task { @MainActor in
                 try? await session.dispose()
             }
+        }
+        mainWindowController.onTrackedWindowChanged = { window in
+            gameplayKeyboardMonitorCoordinator.updateTrackedWindow(window)
         }
         appDelegate.shouldInterceptTermination = {
             closeGameCoordinator.shouldInterceptExitRequests
@@ -241,59 +242,13 @@ struct Cinder64App: App {
         appDelegate.reopenTrackedMainWindow = {
             mainWindowController.reopenTrackedWindowIfNeeded()
         }
-        installGameKeyboardMonitor()
-        // When the emulator display window loses key status — e.g.
-        // because a close-game sheet opens on the main window, another
-        // app steals focus, or the user Cmd+Tabs away — drop every
-        // held scancode in the embedded runtime so keys don't stick.
-        emulatorDisplayController.onKeyboardFocusLost = {
-            session.releaseKeyboardInput()
+        appDelegate.applicationWillTerminate = {
+            gameplayKeyboardMonitorCoordinator.remove()
         }
-    }
-
-    /// Install a local NSEvent monitor that forwards gameplay key
-    /// events to `session.handleKeyboardInput` while the main SwiftUI
-    /// window stays key at all times. Without this we would either
-    /// (a) have to make the emulator child window key — which breaks
-    /// first-click-on-toolbar because SwiftUI .toolbar items don't
-    /// accept first-mouse — or (b) never route keys to the running
-    /// ROM at all.
-    ///
-    /// The monitor is deliberately narrow:
-    ///  * only runs when the runtime is actively playable,
-    ///  * never eats events with Cmd / Ctrl / Option modifiers (menu
-    ///    + SwiftUI-shortcut chords stay intact),
-    ///  * never eats anything while a prompt sheet is visible (so
-    ///    Return / Esc continue to trigger .defaultAction /
-    ///    .cancelAction on the prompt buttons),
-    ///  * never eats events whose keyCode isn't in the gameplay
-    ///    scancode map (so unrelated keys flow through normally).
-    private func installGameKeyboardMonitor() {
-        NSEvent.addLocalMonitorForEvents(
-            matching: [.keyDown, .keyUp, .flagsChanged]
-        ) { [session, closeGameCoordinator] event in
-            let state = session.snapshot.emulationState
-            guard state == .running || state == .paused else { return event }
-
-            // Leave shortcut chords alone.
-            let blockingModifiers: NSEvent.ModifierFlags = [.command, .control, .option]
-            if event.modifierFlags.intersection(blockingModifiers).isEmpty == false {
-                return event
-            }
-
-            // Leave prompt-sheet key routing alone.
-            if closeGameCoordinator.closePrompt != nil
-                || closeGameCoordinator.resumePrompt != nil {
-                return event
-            }
-
-            guard let kbEvent = EmbeddedKeyboardScancodeMap.keyboardEvent(from: event) else {
-                return event
-            }
-
-            session.handleKeyboardInput(kbEvent)
-            return nil
-        }
+        gameplayKeyboardMonitorCoordinator.install(
+            session: session,
+            closeGameCoordinator: closeGameCoordinator
+        )
     }
 
     private func startScriptedKeyPlaybackIfNeeded() {
@@ -326,6 +281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var requestCloseGameForQuit: (() -> Void)?
     var hasTrackedMainWindow: (() -> Bool)?
     var reopenTrackedMainWindow: (() -> Bool)?
+    var applicationWillTerminate: (() -> Void)?
     private var allowsTerminationAfterConfirmedClose = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -381,10 +337,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if allowsTerminationAfterConfirmedClose {
             allowsTerminationAfterConfirmedClose = false
+            applicationWillTerminate?()
             return .terminateNow
         }
 
         guard shouldInterceptTermination?() == true else {
+            applicationWillTerminate?()
             return .terminateNow
         }
 

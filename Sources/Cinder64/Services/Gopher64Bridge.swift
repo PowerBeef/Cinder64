@@ -231,6 +231,10 @@ final class Gopher64Bridge: @unchecked Sendable {
         runtime.string(from: runtime.surfaceEvent(session.rawValue))
     }
 
+    static func validateRequiredFunctionPointersForTesting(_ api: Cinder64BridgeAPI) throws {
+        try LoadedRuntime.validateRequiredFunctionPointers(api)
+    }
+
     private func lastErrorRecord(session: Session) -> BridgeFailureRecord {
         var error = Cinder64Error(code: 0, reserved: 0, message: nil)
         guard runtime.getLastError(session.rawValue, &error) == BridgeStatus.ok.rawValue else {
@@ -378,26 +382,33 @@ private struct LoadedRuntime {
             throw Gopher64BridgeError.abiPreflightFailed("The bundled gopher64 bridge reported incompatible struct sizes.")
         }
 
+        do {
+            try Self.validateRequiredFunctionPointers(api)
+        } catch {
+            dlclose(handle)
+            throw error
+        }
+
         self.handle = handle
-        self.createSession = Self.castFunction(api.create_session, named: "create_session")
-        self.destroySession = Self.castFunction(api.destroy_session, named: "destroy_session")
-        self.attachSurface = Self.castFunction(api.attach_surface, named: "attach_surface")
-        self.updateSurface = Self.castFunction(api.update_surface, named: "update_surface")
-        self.openROM = Self.castFunction(api.open_rom, named: "open_rom")
-        self.pause = Self.castFunction(api.pause, named: "pause")
-        self.resume = Self.castFunction(api.resume, named: "resume")
-        self.reset = Self.castFunction(api.reset, named: "reset")
-        self.saveState = Self.castFunction(api.save_state, named: "save_state")
-        self.loadState = Self.castFunction(api.load_state, named: "load_state")
-        self.updateSettings = Self.castFunction(api.update_settings, named: "update_settings")
-        self.setKeyboardKey = Self.castFunction(api.set_keyboard_key, named: "set_keyboard_key")
-        self.stop = Self.castFunction(api.stop, named: "stop")
-        self.pumpEvents = Self.castFunction(api.pump_events, named: "pump_events")
-        self.getLastError = Self.castFunction(api.get_last_error, named: "get_last_error")
-        self.getMetrics = Self.castFunction(api.get_metrics, named: "get_metrics")
-        self.version = Self.castFunction(api.version, named: "version")
-        self.rendererName = Self.castFunction(api.renderer_name, named: "renderer_name")
-        self.surfaceEvent = Self.castFunction(api.surface_event, named: "surface_event")
+        self.createSession = Self.castFunction(api.create_session)
+        self.destroySession = Self.castFunction(api.destroy_session)
+        self.attachSurface = Self.castFunction(api.attach_surface)
+        self.updateSurface = Self.castFunction(api.update_surface)
+        self.openROM = Self.castFunction(api.open_rom)
+        self.pause = Self.castFunction(api.pause)
+        self.resume = Self.castFunction(api.resume)
+        self.reset = Self.castFunction(api.reset)
+        self.saveState = Self.castFunction(api.save_state)
+        self.loadState = Self.castFunction(api.load_state)
+        self.updateSettings = Self.castFunction(api.update_settings)
+        self.setKeyboardKey = Self.castFunction(api.set_keyboard_key)
+        self.stop = Self.castFunction(api.stop)
+        self.pumpEvents = Self.castFunction(api.pump_events)
+        self.getLastError = Self.castFunction(api.get_last_error)
+        self.getMetrics = Self.castFunction(api.get_metrics)
+        self.version = Self.castFunction(api.version)
+        self.rendererName = Self.castFunction(api.renderer_name)
+        self.surfaceEvent = Self.castFunction(api.surface_event)
     }
 
     func string(from value: UnsafePointer<CChar>?) -> String? {
@@ -439,17 +450,43 @@ private struct LoadedRuntime {
         return unsafeBitCast(symbol, to: T.self)
     }
 
-    private static func castFunction<T>(_ address: UInt, named name: String) -> T {
-        guard address != 0 else {
-            fatalError("Missing bridge function pointer for \(name)")
+    static func validateRequiredFunctionPointers(_ api: Cinder64BridgeAPI) throws {
+        let requiredFunctions: [(String, UInt)] = [
+            ("create_session", api.create_session),
+            ("destroy_session", api.destroy_session),
+            ("attach_surface", api.attach_surface),
+            ("update_surface", api.update_surface),
+            ("open_rom", api.open_rom),
+            ("pause", api.pause),
+            ("resume", api.resume),
+            ("reset", api.reset),
+            ("save_state", api.save_state),
+            ("load_state", api.load_state),
+            ("update_settings", api.update_settings),
+            ("set_keyboard_key", api.set_keyboard_key),
+            ("stop", api.stop),
+            ("pump_events", api.pump_events),
+            ("get_last_error", api.get_last_error),
+            ("get_metrics", api.get_metrics),
+            ("version", api.version),
+            ("renderer_name", api.renderer_name),
+            ("surface_event", api.surface_event),
+        ]
+
+        if let missing = requiredFunctions.first(where: { $0.1 == 0 }) {
+            throw Gopher64BridgeError.missingFunctionPointer(name: missing.0)
         }
+    }
+
+    private static func castFunction<T>(_ address: UInt) -> T {
         return unsafeBitCast(address, to: T.self)
     }
 }
 
-enum Gopher64BridgeError: LocalizedError {
+enum Gopher64BridgeError: LocalizedError, Equatable {
     case dynamicLoadingFailed(path: String, message: String)
     case abiPreflightFailed(String)
+    case missingFunctionPointer(name: String)
     case runtimeInitializationFailed(String)
     case invalidRenderSurface
     case commandFailed(context: String, status: BridgeStatus, message: String)
@@ -460,6 +497,8 @@ enum Gopher64BridgeError: LocalizedError {
             "Could not load the gopher64 bridge at \(path): \(message)"
         case let .abiPreflightFailed(message):
             message
+        case let .missingFunctionPointer(name):
+            "The bundled gopher64 bridge is missing the required \(name) function pointer."
         case let .runtimeInitializationFailed(message):
             message
         case .invalidRenderSurface:

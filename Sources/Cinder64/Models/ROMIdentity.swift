@@ -12,13 +12,8 @@ struct ROMIdentity: Codable, Equatable, Hashable, Sendable {
         let digest = SHA256.hash(data: data)
         let sha256 = digest.map { String(format: "%02x", $0) }.joined()
         let displayName = url.deletingPathExtension().lastPathComponent
-        let sanitized = displayName
-            .lowercased()
-            .replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-
         return ROMIdentity(
-            id: "rom-\(sanitized)",
+            id: "rom-\(sha256.prefix(16))",
             fileURL: url.standardizedFileURL,
             displayName: displayName,
             sha256: sha256

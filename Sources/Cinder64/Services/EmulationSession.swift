@@ -1,10 +1,23 @@
 import Foundation
 import Observation
 
+enum EmulationSessionError: LocalizedError, Equatable {
+    case renderSurfaceUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .renderSurfaceUnavailable:
+            "Cinder64 could not attach a valid render surface before the launch timed out."
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class EmulationSession {
     private let coreHost: CoreHosting
+    private let romIdentityResolver: ROMIdentityResolver
+    private let renderSurfaceWaitTimeout: Duration
     let persistenceStore: PersistenceStore
 
     private(set) var snapshot: SessionSnapshot
@@ -13,7 +26,8 @@ final class EmulationSession {
     private(set) var inputMapping: InputMappingProfile
     private(set) var renderSurface: RenderSurfaceDescriptor?
     private var deferredBootRenderSurface: RenderSurfaceDescriptor?
-    private var pendingSurfaceWaiters: [UUID: CheckedContinuation<RenderSurfaceDescriptor, Never>]
+    private var pendingSurfaceWaiters: [UUID: CheckedContinuation<RenderSurfaceDescriptor, any Error>]
+    private var pendingSurfaceTimeoutTasks: [UUID: Task<Void, Never>]
     private var isPumpInFlight = false
     private var lifecycle = RuntimeLifecycleStateMachine()
 
@@ -27,9 +41,13 @@ final class EmulationSession {
     init(
         coreHost: CoreHosting,
         persistenceStore: PersistenceStore,
-        snapshot: SessionSnapshot = .idle
+        snapshot: SessionSnapshot = .idle,
+        romIdentityResolver: ROMIdentityResolver = .live,
+        renderSurfaceWaitTimeout: Duration = .seconds(5)
     ) {
         self.coreHost = coreHost
+        self.romIdentityResolver = romIdentityResolver
+        self.renderSurfaceWaitTimeout = renderSurfaceWaitTimeout
         self.persistenceStore = persistenceStore
         self.snapshot = snapshot
         self.recentGames = (try? persistenceStore.recentGamesStore.loadRecords()) ?? []
@@ -38,6 +56,7 @@ final class EmulationSession {
         self.renderSurface = nil
         self.deferredBootRenderSurface = nil
         self.pendingSurfaceWaiters = [:]
+        self.pendingSurfaceTimeoutTasks = [:]
     }
 
     /// Move the lifecycle machine forward. Invalid transitions are logged
@@ -56,8 +75,12 @@ final class EmulationSession {
         }
     }
 
+    func resolveROMIdentity(for url: URL) async throws -> ROMIdentity {
+        try await romIdentityResolver.identity(for: url)
+    }
+
     func openROM(url: URL) async throws {
-        let romIdentity = try ROMIdentity.make(for: url)
+        let romIdentity = try await resolveROMIdentity(for: url)
         let settings = try persistenceStore.settingsStore.loadSettings(for: romIdentity) ?? .default
         deferredBootRenderSurface = nil
         activeSettings = settings
@@ -74,7 +97,7 @@ final class EmulationSession {
         advanceLifecycle(to: .booting)
 
         do {
-            let renderSurface = await waitForValidRenderSurface()
+            let renderSurface = try await waitForValidRenderSurface()
             let configuration = CoreHostConfiguration(
                 romIdentity: romIdentity,
                 runtimePaths: nil,
@@ -252,6 +275,8 @@ final class EmulationSession {
 
     func stop() async throws {
         advanceLifecycle(to: .stopping)
+        failAllSurfaceWaiters(throwing: CancellationError())
+        await releaseKeyboardInputBeforeRuntimeBoundary()
         do {
             try await coreHost.stop()
             deferredBootRenderSurface = nil
@@ -273,6 +298,8 @@ final class EmulationSession {
 
     func dispose() async throws {
         advanceLifecycle(to: .stopping)
+        failAllSurfaceWaiters(throwing: CancellationError())
+        await releaseKeyboardInputBeforeRuntimeBoundary()
         do {
             try await coreHost.dispose()
             deferredBootRenderSurface = nil
@@ -378,23 +405,91 @@ final class EmulationSession {
         snapshot.warningBanner = nil
     }
 
-    private func waitForValidRenderSurface() async -> RenderSurfaceDescriptor {
+    private func releaseKeyboardInputBeforeRuntimeBoundary() async {
+        guard snapshot.activeROM != nil else {
+            return
+        }
+
+        do {
+            try await coreHost.releaseKeyboardInput()
+        } catch {
+            persistenceStore.logStore.record(
+                "warning",
+                "releaseKeyboardInput before runtime boundary failed: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func waitForValidRenderSurface() async throws -> RenderSurfaceDescriptor {
         if let renderSurface, renderSurface.isValid {
             return renderSurface
         }
 
         let waiterID = UUID()
-        return await withCheckedContinuation { continuation in
-            pendingSurfaceWaiters[waiterID] = continuation
+        defer {
+            pendingSurfaceTimeoutTasks.removeValue(forKey: waiterID)?.cancel()
+            pendingSurfaceWaiters.removeValue(forKey: waiterID)
+        }
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pendingSurfaceWaiters[waiterID] = continuation
+                pendingSurfaceTimeoutTasks[waiterID] = Task { [weak self, renderSurfaceWaitTimeout] in
+                    do {
+                        try await Task.sleep(for: renderSurfaceWaitTimeout)
+                        await MainActor.run {
+                            self?.failSurfaceWaiter(
+                                id: waiterID,
+                                throwing: EmulationSessionError.renderSurfaceUnavailable
+                            )
+                        }
+                    } catch {
+                    }
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.failSurfaceWaiter(id: waiterID, throwing: CancellationError())
+            }
         }
     }
 
     private func resumeSurfaceWaiters(with descriptor: RenderSurfaceDescriptor) {
         let waiters = pendingSurfaceWaiters.values
+        let timeoutTasks = pendingSurfaceTimeoutTasks.values
         pendingSurfaceWaiters.removeAll()
+        pendingSurfaceTimeoutTasks.removeAll()
+
+        for task in timeoutTasks {
+            task.cancel()
+        }
 
         for waiter in waiters {
             waiter.resume(returning: descriptor)
+        }
+    }
+
+    private func failSurfaceWaiter(id: UUID, throwing error: Error) {
+        guard let waiter = pendingSurfaceWaiters.removeValue(forKey: id) else {
+            return
+        }
+
+        pendingSurfaceTimeoutTasks.removeValue(forKey: id)?.cancel()
+        waiter.resume(throwing: error)
+    }
+
+    private func failAllSurfaceWaiters(throwing error: Error) {
+        let waiters = pendingSurfaceWaiters.values
+        let timeoutTasks = pendingSurfaceTimeoutTasks.values
+        pendingSurfaceWaiters.removeAll()
+        pendingSurfaceTimeoutTasks.removeAll()
+
+        for task in timeoutTasks {
+            task.cancel()
+        }
+
+        for waiter in waiters {
+            waiter.resume(throwing: error)
         }
     }
 

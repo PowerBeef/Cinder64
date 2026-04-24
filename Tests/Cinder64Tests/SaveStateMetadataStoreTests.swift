@@ -2,13 +2,14 @@ import Foundation
 import Testing
 @testable import Cinder64
 
+@Suite
 struct SaveStateMetadataStoreTests {
     @Test func recordsProtectedCloseSavesSeparatelyFromManualSlots() throws {
-        let harness = try TemporaryDirectoryHarness()
-        let store = SaveStateMetadataStore(storageURL: harness.directory.appending(path: "savestates.json"))
+        let temporaryDirectory = try TemporaryDirectoryFixture()
+        let store = SaveStateMetadataStore(storageURL: temporaryDirectory.url("savestates.json"))
         let identity = ROMIdentity(
             id: "rom-super-mario-64",
-            fileURL: harness.directory.appending(path: "Super Mario 64.z64"),
+            fileURL: temporaryDirectory.url("Super Mario 64.z64"),
             displayName: "Super Mario 64",
             sha256: "abc123"
         )

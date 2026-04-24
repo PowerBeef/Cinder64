@@ -32,11 +32,47 @@ jobs:
           rustc --version || true
           cargo --version || true
 
-      - name: swift test
-        run: swift test
+      - name: Run default test lane
+        run: ./script/test_all.sh --artifacts test-artifacts/ci-default
 
-      - name: Bash helper tests
-        run: ./script/test_app_bundle_helpers.sh
+      - name: Upload default test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: default-test-artifacts
+          path: test-artifacts/ci-default
+
+  rust-bridge-test:
+    name: rust bridge tests
+    runs-on: macos-15
+    timeout-minutes: 35
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Cargo outputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ThirdParty/gopher64/cinder64_bridge/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('ThirdParty/gopher64/cinder64_bridge/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run Rust bridge tests
+        run: |
+          set -o pipefail
+          mkdir -p test-artifacts/rust-bridge
+          cargo test --manifest-path ThirdParty/gopher64/cinder64_bridge/Cargo.toml 2>&1 | tee test-artifacts/rust-bridge/cargo-test.log
+
+      - name: Upload Rust bridge artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-bridge-test-artifacts
+          path: test-artifacts/rust-bridge
 
   bundle-assembly:
     name: bundle assembly smoke
@@ -46,7 +82,7 @@ jobs:
     # default. Install via Homebrew and expose paths via the env vars
     # BundledGopher64RuntimeLocator respects so the bundler can find
     # them without brew --prefix lookups at build time.
-    needs: swift-test
+    needs: [swift-test, rust-bridge-test]
 
     steps:
       - uses: actions/checkout@v4

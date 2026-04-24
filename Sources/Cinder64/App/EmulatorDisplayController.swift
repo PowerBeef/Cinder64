@@ -17,15 +17,9 @@ final class EmulatorDisplayController {
     let window: EmulatorDisplayWindow
     let surfaceView: EmulatorDisplaySurfaceView
 
-    /// Called whenever the emulator window resigns key, so the embedded
-    /// runtime can release any held scancodes. Wired to
-    /// EmulationSession.releaseKeyboardInput() at app init.
-    var onKeyboardFocusLost: (() -> Void)?
-
     private weak var anchorView: NSView?
     private weak var parentWindow: NSWindow?
     private var parentWindowObservers: [NSObjectProtocol] = []
-    private var emulatorWindowObservers: [NSObjectProtocol] = []
     private var isAttached = false
     private var overlayHostingView: NSHostingView<AnyView>?
     private var currentOverlayContent: SurfaceOverlayContent?
@@ -53,14 +47,6 @@ final class EmulatorDisplayController {
         window.contentView = containerView
 
         self.window = window
-        registerEmulatorWindowObservers()
-    }
-
-    /// Give the emulator window key focus. Called after a ROM boot so
-    /// the user can start playing without having to click into the
-    /// gameplay stage first.
-    func makeKey() {
-        window.makeKeyAndOrderFront(nil)
     }
 
     /// Toggle the emulator display window's on-screen presence without
@@ -237,17 +223,4 @@ final class EmulatorDisplayController {
         parentWindowObservers.removeAll()
     }
 
-    private func registerEmulatorWindowObservers() {
-        let center = NotificationCenter.default
-        let observer = center.addObserver(
-            forName: NSWindow.didResignKeyNotification,
-            object: window,
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.onKeyboardFocusLost?()
-            }
-        }
-        emulatorWindowObservers.append(observer)
-    }
 }

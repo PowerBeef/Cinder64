@@ -111,8 +111,8 @@ final class CloseGameCoordinator {
         await completeClose(using: prompt.intent)
     }
 
-    func prepareLaunchRequest(for url: URL) throws -> CloseGameLaunchRequestDecision {
-        let identity = try ROMIdentity.make(for: url)
+    func prepareLaunchRequest(for url: URL) async throws -> CloseGameLaunchRequestDecision {
+        let identity = try await session.resolveROMIdentity(for: url)
         guard try session.persistenceStore.saveStateStore.hasProtectedCloseSave(for: identity) else {
             return .launchNormally
         }

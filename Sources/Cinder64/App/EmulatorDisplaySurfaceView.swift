@@ -8,8 +8,7 @@ import QuartzCore
 /// Owns: the Metal backing layer, the render-surface descriptor
 /// publication pipeline, the per-frame pump driver (CADisplayLink
 /// bound to this view's screen via NSView.displayLink(target:selector:),
-/// automatically refresh-rate-matched for ProMotion), and the scoped
-/// keyDown/keyUp/flagsChanged event chain.
+/// automatically refresh-rate-matched for ProMotion).
 @MainActor
 final class EmulatorDisplaySurfaceView: NSView {
     private static let logger = Logger(
@@ -19,7 +18,6 @@ final class EmulatorDisplaySurfaceView: NSView {
     private static var nextSurfaceID: UInt64 = 1
 
     var surfaceChanged: (RenderSurfaceDescriptor?) -> Void = { _ in }
-    var keyboardInputChanged: (EmbeddedKeyboardEvent) -> Void = { _ in }
     var pumpRuntimeEvents: () -> Void = {}
 
     private var pumpDisplayLink: CADisplayLink?
@@ -28,8 +26,6 @@ final class EmulatorDisplaySurfaceView: NSView {
     private var eventPumpDeferredForLiveResize = false
     private let surfaceID: UInt64
     private var surfaceGeneration: UInt64
-
-    override var acceptsFirstResponder: Bool { true }
 
     override init(frame frameRect: NSRect) {
         let identifier = Self.nextSurfaceID
@@ -57,7 +53,6 @@ final class EmulatorDisplaySurfaceView: NSView {
         super.viewDidMoveToWindow()
         configureEventPumpIfNeeded()
         publishDescriptorIfPossible()
-        focusHostForKeyboardInput()
     }
 
     override func layout() {
@@ -95,30 +90,6 @@ final class EmulatorDisplaySurfaceView: NSView {
         // input reaches the running ROM via the gated NSEvent local
         // monitor installed in Cinder64App.installGameKeyboardMonitor.
         super.mouseDown(with: event)
-    }
-
-    override func keyDown(with event: NSEvent) {
-        if let keyboardEvent = keyboardEvent(from: event) {
-            keyboardInputChanged(keyboardEvent)
-            return
-        }
-        super.keyDown(with: event)
-    }
-
-    override func keyUp(with event: NSEvent) {
-        if let keyboardEvent = keyboardEvent(from: event) {
-            keyboardInputChanged(keyboardEvent)
-            return
-        }
-        super.keyUp(with: event)
-    }
-
-    override func flagsChanged(with event: NSEvent) {
-        if let keyboardEvent = keyboardEvent(from: event) {
-            keyboardInputChanged(keyboardEvent)
-            return
-        }
-        super.flagsChanged(with: event)
     }
 
     func publishDescriptorIfPossible(forceCommit: Bool = false) {
@@ -269,46 +240,6 @@ final class EmulatorDisplaySurfaceView: NSView {
     private func invalidateEventPump() {
         pumpDisplayLink?.invalidate()
         pumpDisplayLink = nil
-    }
-
-    private func focusHostForKeyboardInput() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let window = self.window else { return }
-            _ = window.makeFirstResponder(self)
-        }
-    }
-
-    private func keyboardEvent(from event: NSEvent) -> EmbeddedKeyboardEvent? {
-        switch event.type {
-        case .flagsChanged:
-            guard let scancode = EmbeddedKeyboardScancodeMap.scancode(forMacKeyCode: event.keyCode) else {
-                return nil
-            }
-
-            let isPressed = switch event.keyCode {
-            case 56, 60:
-                event.modifierFlags.contains(.shift)
-            case 59, 62:
-                event.modifierFlags.contains(.control)
-            default:
-                false
-            }
-
-            return EmbeddedKeyboardEvent(scancode: scancode, isPressed: isPressed)
-        case .keyDown:
-            guard event.isARepeat == false else {
-                return nil
-            }
-            fallthrough
-        case .keyUp:
-            guard let scancode = EmbeddedKeyboardScancodeMap.scancode(forMacKeyCode: event.keyCode) else {
-                return nil
-            }
-
-            return EmbeddedKeyboardEvent(scancode: scancode, isPressed: event.type == .keyDown)
-        default:
-            return nil
-        }
     }
 
     @objc private func handleEventPumpTick(_: CADisplayLink) {

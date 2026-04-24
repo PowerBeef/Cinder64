@@ -11,6 +11,10 @@ source "$ROOT_DIR/script/app_bundle_helpers.sh"
 DEFAULT_ROM="$ROOT_DIR/Super Mario 64 (USA)/Super Mario 64 (USA).z64"
 ROM_PATH="${1:-$DEFAULT_ROM}"
 VERIFY_ROOT="${2:-$(mktemp -d "${TMPDIR:-/tmp}/cinder64-fullboot.XXXXXX")}"
+case "$VERIFY_ROOT" in
+  /*) ;;
+  *) VERIFY_ROOT="$ROOT_DIR/$VERIFY_ROOT" ;;
+esac
 APP_SUPPORT_ROOT="$VERIFY_ROOT/app-support"
 RUNTIME_LOG_FILE="$APP_SUPPORT_ROOT/logs/runtime.log"
 METRICS_FILE="$APP_SUPPORT_ROOT/metrics.json"
@@ -52,10 +56,9 @@ rm -rf "$APP_SUPPORT_ROOT"
 mkdir -p "$APP_SUPPORT_ROOT"
 cinder64_capture_crash_snapshot "$BEFORE_CRASHES" "$CRASH_REPORT_DIR"
 
-env \
-  CINDER64_APP_SUPPORT_ROOT="$APP_SUPPORT_ROOT" \
-  CINDER64_SCRIPTED_KEYS="$SCRIPTED_KEYS" \
-  /usr/bin/open -n -a "$APP_BUNDLE" "$ROM_PATH"
+/usr/bin/open -n -a "$APP_BUNDLE" "$ROM_PATH" --args \
+  --app-support-root "$APP_SUPPORT_ROOT" \
+  --scripted-keys "$SCRIPTED_KEYS"
 
 if ! LAUNCHED_PID="$(cinder64_wait_for_pid_for_bundle "$APP_BUNDLE" 120)"; then
   echo "Timed out waiting for the launched $APP_NAME process." >&2

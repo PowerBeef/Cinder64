@@ -2,11 +2,11 @@ import Foundation
 import Testing
 @testable import Cinder64
 
+@Suite
 struct RecentGamesStoreTests {
     @Test func recordsRecentGamesAsAnLRUList() throws {
-        let harness = try TemporaryDirectoryHarness()
-        let storageURL = harness.directory.appending(path: "recent-games.json")
-        let store = RecentGamesStore(storageURL: storageURL, maxItems: 2)
+        let temporaryDirectory = try TemporaryDirectoryFixture()
+        let store = RecentGamesStore(storageURL: temporaryDirectory.url("recent-games.json"), maxItems: 2)
 
         let gameOne = makeIdentity(name: "Mario")
         let gameTwo = makeIdentity(name: "Zelda")
@@ -24,14 +24,5 @@ struct RecentGamesStoreTests {
             .init(timeIntervalSince1970: 400),
             .init(timeIntervalSince1970: 300),
         ])
-    }
-}
-
-struct TemporaryDirectoryHarness {
-    let directory: URL
-
-    init() throws {
-        directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 }
