@@ -1,0 +1,685 @@
+use crate::retroachievements;
+use crate::ui;
+use slint::Model;
+use slint::winit_030::WinitWindowAccessor;
+
+slint::include_modules!();
+
+pub const N64_EXTENSIONS: [&str; 12] = [
+    "n64", "v64", "z64", "7z", "zip", "bin", "N64", "V64", "Z64", "7Z", "ZIP", "BIN",
+];
+
+const MAX_RECENT_ROMS: usize = 10;
+
+pub struct NetplayDevice {
+    pub peer_addr: std::net::SocketAddr,
+    pub player_number: u8,
+}
+
+#[derive(Clone)]
+pub struct RASettings {
+    pub enabled: bool,
+    pub hardcore: bool,
+    pub challenge: bool,
+    pub leaderboard: bool,
+}
+
+fn recent_rom_title(path: &std::path::Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map_or_else(|| path.display().to_string(), ToString::to_string)
+}
+
+fn unix_timestamp_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs() as i64)
+}
+
+fn make_recent_rom(path: &std::path::Path) -> ui::config::RecentRom {
+    ui::config::RecentRom {
+        path: path.to_string_lossy().to_string(),
+        title: recent_rom_title(path),
+        last_launched_unix: unix_timestamp_now(),
+    }
+}
+
+fn recent_rom_model(recent_roms: &[ui::config::RecentRom]) -> slint::ModelRc<RecentRom> {
+    slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(
+        recent_roms
+            .iter()
+            .map(|rom| RecentRom {
+                path: rom.path.clone().into(),
+                title: rom.title.clone().into(),
+            })
+            .collect::<Vec<RecentRom>>(),
+    )))
+}
+
+fn set_recent_roms(app: &AppWindow, mut recent_roms: Vec<ui::config::RecentRom>) {
+    recent_roms.sort_by(|lhs, rhs| rhs.last_launched_unix.cmp(&lhs.last_launched_unix));
+    recent_roms.truncate(MAX_RECENT_ROMS);
+    app.set_recent_roms(recent_rom_model(&recent_roms));
+}
+
+fn recent_roms_from_app(
+    app: &AppWindow,
+    persisted_recent_roms: &[ui::config::RecentRom],
+) -> Vec<ui::config::RecentRom> {
+    app.get_recent_roms()
+        .iter()
+        .map(|rom| {
+            let path = rom.path.to_string();
+            let title = rom.title.to_string();
+            let last_launched_unix = persisted_recent_roms
+                .iter()
+                .find(|recent_rom| recent_rom.path == path)
+                .map_or(0, |recent_rom| recent_rom.last_launched_unix);
+            ui::config::RecentRom {
+                path,
+                title,
+                last_launched_unix,
+            }
+        })
+        .collect()
+}
+
+fn record_recent_rom(app: &AppWindow, path: &std::path::Path) {
+    let persisted_config = ui::config::Config::new();
+    let mut recent_roms = recent_roms_from_app(app, &persisted_config.recent_roms);
+    let recent_rom = make_recent_rom(path);
+    recent_roms.retain(|entry| entry.path != recent_rom.path);
+    recent_roms.insert(0, recent_rom);
+    set_recent_roms(app, recent_roms);
+}
+
+fn remove_recent_rom(app: &AppWindow, path: &str) {
+    let persisted_config = ui::config::Config::new();
+    let mut recent_roms = recent_roms_from_app(app, &persisted_config.recent_roms);
+    recent_roms.retain(|entry| entry.path != path);
+    set_recent_roms(app, recent_roms);
+}
+
+fn clear_recent_roms(app: &AppWindow) {
+    set_recent_roms(app, Vec::new());
+}
+
+fn show_error_dialog(message: impl Into<slint::SharedString>) {
+    let dialog = ErrorDialog::new().unwrap();
+    dialog.set_text(message.into());
+    dialog.run().unwrap();
+}
+
+fn run_with_path(
+    weak: slint::Weak<AppWindow>,
+    path: std::path::PathBuf,
+    controller_paths: &[Option<String>],
+) {
+    let controller_paths = controller_paths.to_owned();
+    let weak2 = weak.clone();
+    weak.upgrade_in_event_loop(move |handle| {
+        if handle.get_game_running() {
+            return;
+        }
+        if !path.exists() {
+            let missing_path = path.to_string_lossy().to_string();
+            remove_recent_rom(&handle, &missing_path);
+            save_settings(&handle, &controller_paths);
+            show_error_dialog(format!(
+                "Cinder64 could not find this recent ROM:\n\n{missing_path}\n\nIt was removed from Recent ROMs."
+            ));
+            return;
+        }
+        record_recent_rom(&handle, &path);
+        save_settings(&handle, &controller_paths);
+
+        run_rom(
+            path,
+            ui::GameSettings {
+                overclock: handle.get_overclock_n64_cpu(),
+                disable_expansion_pak: handle.get_disable_expansion_pak(),
+                cheats: std::collections::HashMap::new(), // will be filled in later
+                load_savestate_slot: None,
+            },
+            None,
+            RASettings {
+                enabled: handle.get_ra_enabled(),
+                hardcore: handle.get_ra_hardcore(),
+                challenge: handle.get_ra_challenge(),
+                leaderboard: handle.get_ra_leaderboard(),
+            },
+            weak2,
+        );
+    })
+    .unwrap();
+}
+
+fn file_dropped(app: &AppWindow, controller_paths: &[Option<String>]) {
+    let weak = app.as_weak();
+    let controller_paths = controller_paths.to_owned();
+    app.window()
+        .on_winit_window_event(move |_winit_window, event| {
+            if let slint::winit_030::winit::event::WindowEvent::DroppedFile(path) = event {
+                run_with_path(weak.clone(), path.to_path_buf(), &controller_paths);
+            }
+            slint::winit_030::EventResult::Propagate
+        });
+}
+
+fn local_game_window(
+    app: &AppWindow,
+    config: &ui::config::Config,
+    controller_paths: &[Option<String>],
+) {
+    let dirs = ui::get_dirs();
+
+    set_recent_roms(app, config.recent_roms.clone());
+
+    let weak = app.as_weak();
+    let owned_controller_paths = controller_paths.to_owned();
+    app.on_open_rom_button_clicked(move || {
+        let controller_paths = owned_controller_paths.clone();
+        weak.upgrade_in_event_loop(move |handle| open_rom(&handle, &controller_paths))
+            .unwrap();
+    });
+
+    let weak = app.as_weak();
+    let owned_controller_paths = controller_paths.to_owned();
+    app.on_open_recent_rom(move |rom| {
+        let controller_paths = owned_controller_paths.clone();
+        weak.upgrade_in_event_loop(move |handle| {
+            run_with_path(
+                handle.as_weak(),
+                std::path::PathBuf::from(rom.to_string()),
+                &controller_paths,
+            );
+        })
+        .unwrap();
+    });
+
+    let weak = app.as_weak();
+    let owned_controller_paths = controller_paths.to_owned();
+    app.on_remove_recent_rom(move |rom| {
+        let controller_paths = owned_controller_paths.clone();
+        weak.upgrade_in_event_loop(move |handle| {
+            remove_recent_rom(&handle, &rom);
+            save_settings(&handle, &controller_paths);
+        })
+        .unwrap();
+    });
+
+    let weak = app.as_weak();
+    let owned_controller_paths = controller_paths.to_owned();
+    app.on_clear_recent_roms(move || {
+        let controller_paths = owned_controller_paths.clone();
+        weak.upgrade_in_event_loop(move |handle| {
+            clear_recent_roms(&handle);
+            save_settings(&handle, &controller_paths);
+        })
+        .unwrap();
+    });
+
+    let saves_path = dirs.data_dir.join("saves");
+    app.on_saves_folder_button_clicked(move || {
+        open::that_detached(saves_path.clone()).unwrap();
+    });
+    file_dropped(app, controller_paths);
+}
+
+fn input_profiles(config: &ui::config::Config) -> Vec<String> {
+    let mut profiles = vec![];
+    for key in config.input.input_profiles.keys() {
+        profiles.push(key.clone())
+    }
+    profiles
+}
+
+fn settings_window(app: &AppWindow, config: &ui::config::Config) {
+    app.set_integer_scaling(config.video.integer_scaling);
+    app.set_fullscreen(config.video.fullscreen);
+    app.set_widescreen(config.video.widescreen);
+    app.set_vsync(config.video.vsync);
+    app.set_apply_crt_shader(config.video.crt);
+    app.set_overclock_n64_cpu(config.emulation.overclock);
+    app.set_disable_expansion_pak(config.emulation.disable_expansion_pak);
+    app.set_emulate_usb(config.emulation.usb);
+    let combobox_value = match config.video.upscale {
+        1 => 0,
+        2 => 1,
+        4 => 2,
+        8 => 3,
+        _ => 0,
+    };
+    app.set_resolution(combobox_value);
+
+    if let Some(rom_dir_str) = config.rom_dir.to_str() {
+        app.set_rom_dir(rom_dir_str.into());
+    }
+}
+
+fn update_input_profiles(weak: &slint::Weak<AppWindow>, config: &ui::config::Config) {
+    let profiles = input_profiles(config);
+    let config_bindings = config.input.input_profile_binding.clone();
+    let weak2 = weak.clone();
+    weak.upgrade_in_event_loop(move |handle| {
+        let profile_bindings = slint::VecModel::default();
+        for (i, input_profile_binding) in handle.get_selected_profile_binding().iter().enumerate() {
+            let currently_selected = handle
+                .get_input_profiles()
+                .row_data(input_profile_binding as usize)
+                .unwrap_or(config_bindings[i].clone().into())
+                .to_string();
+            let position = profiles
+                .iter()
+                .position(|profile| *profile == currently_selected);
+            profile_bindings.push(position.unwrap() as i32);
+        }
+
+        handle.set_input_profiles(slint::ModelRc::from(std::rc::Rc::new(
+            slint::VecModel::from(
+                profiles
+                    .iter()
+                    .map(|x| x.into())
+                    .collect::<Vec<slint::SharedString>>(),
+            ),
+        )));
+
+        handle
+            .set_selected_profile_binding(slint::ModelRc::from(std::rc::Rc::new(profile_bindings)));
+
+        // this is a workaround to make the input profile combobox update
+        handle.set_blank_profiles(true);
+        slint::Timer::single_shot(std::time::Duration::from_millis(200), move || {
+            weak2
+                .upgrade_in_event_loop(move |handle| {
+                    handle.set_blank_profiles(false);
+                })
+                .unwrap();
+        });
+    })
+    .unwrap();
+}
+
+fn controller_window(
+    app: &AppWindow,
+    config: &ui::config::Config,
+    controller_names: &[String],
+    controller_paths: &[Option<String>],
+) {
+    app.set_emulate_vru(config.input.emulate_vru);
+
+    app.set_controller_enabled(slint::ModelRc::from(std::rc::Rc::new(
+        slint::VecModel::from(config.input.controller_enabled.to_vec()),
+    )));
+
+    app.set_transferpak(slint::ModelRc::from(std::rc::Rc::new(
+        slint::VecModel::from(config.input.transfer_pak.to_vec()),
+    )));
+
+    app.set_gb_rom_paths(slint::ModelRc::from(std::rc::Rc::new(
+        slint::VecModel::from(
+            config
+                .input
+                .gb_rom_path
+                .iter()
+                .map(|x| x.into())
+                .collect::<Vec<slint::SharedString>>(),
+        ),
+    )));
+
+    app.set_gb_ram_paths(slint::ModelRc::from(std::rc::Rc::new(
+        slint::VecModel::from(
+            config
+                .input
+                .gb_ram_path
+                .iter()
+                .map(|x| x.into())
+                .collect::<Vec<slint::SharedString>>(),
+        ),
+    )));
+
+    update_input_profiles(&app.as_weak(), config);
+
+    app.set_controller_names(slint::ModelRc::from(std::rc::Rc::new(
+        slint::VecModel::from(
+            controller_names
+                .iter()
+                .map(|x| x.into())
+                .collect::<Vec<slint::SharedString>>(),
+        ),
+    )));
+
+    let controller_changed = slint::VecModel::default();
+    let selected_controllers = slint::VecModel::default();
+    for selected in config.input.controller_assignment.iter() {
+        let selected_index = controller_paths
+            .iter()
+            .position(|path| selected == path)
+            .unwrap_or(0) as i32;
+        selected_controllers.push(selected_index);
+        controller_changed.push(false);
+    }
+    app.set_selected_controller(slint::ModelRc::from(std::rc::Rc::new(selected_controllers)));
+
+    app.set_controller_changed(slint::ModelRc::from(std::rc::Rc::new(controller_changed)));
+
+    let weak_app = app.as_weak();
+    app.on_input_profile_button_clicked(move || {
+        let dialog = InputProfileDialog::new().unwrap();
+        dialog.set_deadzone(ui::input::DEADZONE_DEFAULT);
+        let weak_dialog = dialog.as_weak();
+        let weak_app = weak_app.clone();
+        dialog.on_profile_creation_button_clicked(move || {
+            let weak_app = weak_app.clone();
+            weak_dialog
+                .upgrade_in_event_loop(move |handle| {
+                    handle.hide().unwrap();
+                    let profile_name = handle.get_profile_name();
+                    let dinput = handle.get_dinput();
+                    let deadzone = handle.get_deadzone();
+
+                    tokio::spawn(async move {
+                        let cli_path = std::env::current_exe()
+                            .unwrap()
+                            .parent()
+                            .unwrap()
+                            .join(format!("{}-cli", env!("CARGO_PKG_NAME")));
+                        let cmd_path = if cfg!(target_os = "macos") && cli_path.exists() {
+                            cli_path
+                        } else {
+                            std::env::current_exe().unwrap()
+                        };
+                        let mut command = tokio::process::Command::new(cmd_path);
+                        command.args([
+                            "--configure-input-profile",
+                            &profile_name,
+                            "--deadzone",
+                            &deadzone.to_string(),
+                        ]);
+                        if dinput {
+                            command.arg("--use-dinput");
+                        }
+                        if !command.status().await.unwrap().success() {
+                            eprintln!("Failed to configure input profile");
+                        }
+                        let config = ui::config::Config::new();
+                        update_input_profiles(&weak_app, &config);
+                    });
+                })
+                .unwrap();
+        });
+        dialog.show().unwrap();
+    });
+    let weak_app2 = app.as_weak();
+    app.on_transferpak_toggled(move |player, enabled| {
+        if enabled {
+            let select_gb_rom = rfd::AsyncFileDialog::new()
+                .set_title(format!("GB ROM P{}", player + 1))
+                .add_filter("GB ROM files", &["gb", "gbc", "GB", "GBC"])
+                .pick_file();
+            let select_gb_ram = rfd::AsyncFileDialog::new()
+                .set_title(format!("GB RAM P{}", player + 1))
+                .add_filter("GB RAM files", &["sav", "ram", "srm", "SAV", "RAM", "SRM"])
+                .pick_file();
+            let weak_app3 = weak_app2.clone();
+            tokio::spawn(async move {
+                if let (Some(gb_rom), Some(gb_ram)) = (select_gb_rom.await, select_gb_ram.await) {
+                    weak_app3
+                        .upgrade_in_event_loop(move |handle| {
+                            let rom_paths = handle.get_gb_rom_paths();
+                            let ram_paths = handle.get_gb_ram_paths();
+                            rom_paths.set_row_data(
+                                player as usize,
+                                gb_rom.path().to_str().unwrap().into(),
+                            );
+                            ram_paths.set_row_data(
+                                player as usize,
+                                gb_ram.path().to_str().unwrap().into(),
+                            );
+                            handle.set_gb_rom_paths(rom_paths);
+                            handle.set_gb_ram_paths(ram_paths);
+                        })
+                        .unwrap();
+                } else {
+                    weak_app3
+                        .upgrade_in_event_loop(move |handle| {
+                            let rom_paths = handle.get_gb_rom_paths();
+                            let ram_paths = handle.get_gb_ram_paths();
+                            rom_paths.set_row_data(player as usize, String::new().into());
+                            ram_paths.set_row_data(player as usize, String::new().into());
+                            handle.set_gb_rom_paths(rom_paths);
+                            handle.set_gb_ram_paths(ram_paths);
+                        })
+                        .unwrap();
+                }
+            });
+        }
+    });
+}
+
+pub fn save_settings(app: &AppWindow, controller_paths: &[Option<String>]) {
+    let mut config = ui::config::Config::new();
+    config.video.integer_scaling = app.get_integer_scaling();
+    config.video.fullscreen = app.get_fullscreen();
+    config.video.widescreen = app.get_widescreen();
+    config.video.vsync = app.get_vsync();
+    config.video.crt = app.get_apply_crt_shader();
+    config.emulation.overclock = app.get_overclock_n64_cpu();
+    config.emulation.disable_expansion_pak = app.get_disable_expansion_pak();
+    config.emulation.usb = app.get_emulate_usb();
+    let upscale_values = [1, 2, 4, 8];
+    config.video.upscale = upscale_values[app.get_resolution() as usize];
+
+    config.input.emulate_vru = app.get_emulate_vru();
+    for (i, controller_enabled) in app.get_controller_enabled().iter().enumerate() {
+        config.input.controller_enabled[i] = controller_enabled;
+    }
+    for (i, transferpak_enabled) in app.get_transferpak().iter().enumerate() {
+        config.input.transfer_pak[i] = transferpak_enabled;
+        config.input.gb_rom_path[i] = app.get_gb_rom_paths().row_data(i).unwrap().to_string();
+        config.input.gb_ram_path[i] = app.get_gb_ram_paths().row_data(i).unwrap().to_string();
+    }
+    for (i, input_profile_binding) in app.get_selected_profile_binding().iter().enumerate() {
+        config.input.input_profile_binding[i] = app
+            .get_input_profiles()
+            .row_data(input_profile_binding as usize)
+            .unwrap()
+            .to_string();
+    }
+
+    for (i, selected_controller) in app.get_selected_controller().iter().enumerate() {
+        if app.get_controller_changed().row_data(i).unwrap_or(false) {
+            config.input.controller_assignment[i] =
+                controller_paths[selected_controller as usize].clone();
+        }
+    }
+
+    config.recent_roms = recent_roms_from_app(app, &config.recent_roms);
+}
+
+fn about_window(app: &AppWindow) {
+    app.on_wiki_button_clicked(move || {
+        open::that_detached("https://github.com/gopher64/gopher64/wiki").unwrap();
+    });
+    app.on_discord_button_clicked(move || {
+        open::that_detached("https://discord.gg/9RGXq8W8JQ").unwrap();
+    });
+    app.on_patreon_button_clicked(move || {
+        open::that_detached("https://patreon.com/loganmc10").unwrap();
+    });
+    app.on_github_sponsors_button_clicked(move || {
+        open::that_detached("https://github.com/sponsors/loganmc10").unwrap();
+    });
+    app.on_source_code_button_clicked(move || {
+        open::that_detached("https://github.com/PowerBeef/Cinder64").unwrap();
+    });
+    app.on_newversion_button_clicked(move || {
+        open::that_detached("https://github.com/PowerBeef/Cinder64/releases").unwrap();
+    });
+    app.set_version(
+        format!(
+            "Cinder64, based on gopher64\nVersion: {}",
+            env!("GIT_DESCRIBE")
+        )
+        .into(),
+    );
+}
+
+pub fn app_window() {
+    let app = AppWindow::new().unwrap();
+    about_window(&app);
+    ui::retroachievements::ra_window(&app);
+    let mut controller_paths;
+    {
+        let game_ui = ui::Ui::new();
+        let mut controller_names = ui::input::get_controller_names(&game_ui);
+        controller_names.insert(0, "None".into());
+        controller_paths = ui::input::get_controller_paths(&game_ui);
+        controller_paths.insert(0, None);
+        settings_window(&app, &game_ui.config);
+        controller_window(&app, &game_ui.config, &controller_names, &controller_paths);
+        local_game_window(&app, &game_ui.config, &controller_paths);
+    }
+    ui::netplay::netplay_window(&app, &controller_paths);
+    ui::cheats::cheats_window(&app);
+    app.run().unwrap();
+    save_settings(&app, &controller_paths);
+}
+
+pub fn run_rom(
+    file_path: std::path::PathBuf,
+    game_settings: ui::GameSettings,
+    netplay: Option<NetplayDevice>,
+    ra_settings: RASettings,
+    weak: slint::Weak<AppWindow>,
+) {
+    tokio::spawn(async move {
+        weak.upgrade_in_event_loop(move |handle| handle.set_game_running(true))
+            .unwrap();
+
+        let cli_path = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!("{}-cli", env!("CARGO_PKG_NAME")));
+        let cmd_path = if cfg!(target_os = "macos") && cli_path.exists() {
+            cli_path
+        } else {
+            std::env::current_exe().unwrap()
+        };
+        let mut command = tokio::process::Command::new(cmd_path);
+        command.args([
+            "--overclock",
+            &game_settings.overclock.to_string(),
+            "--disable-expansion-pak",
+            &game_settings.disable_expansion_pak.to_string(),
+        ]);
+        let cheats_path = ui::get_dirs().cache_dir.join("cheats.json");
+        if let Some(netplay_device) = netplay {
+            let f = std::fs::File::create(cheats_path.to_str().unwrap()).unwrap();
+            serde_json::to_writer_pretty(f, &game_settings.cheats).unwrap();
+
+            command.args([
+                "--netplay-peer-addr",
+                &netplay_device.peer_addr.to_string(),
+                "--netplay-player-number",
+                &netplay_device.player_number.to_string(),
+                "--cheats",
+                cheats_path.to_str().unwrap(),
+            ]);
+        }
+        if ra_settings.enabled {
+            command.args([
+                "--ra-username",
+                &retroachievements::get_username().unwrap_or("unknown".into()),
+                "--ra-token",
+                &retroachievements::get_token().unwrap_or("unknown".into()),
+            ]);
+            if ra_settings.hardcore {
+                command.args(["--ra-hardcore"]);
+            }
+            if ra_settings.challenge {
+                command.args(["--ra-challenge"]);
+            }
+            if ra_settings.leaderboard {
+                command.args(["--ra-leaderboard"]);
+            }
+        }
+
+        let success = command
+            .arg(file_path.to_str().unwrap())
+            .status()
+            .await
+            .unwrap()
+            .success();
+
+        if !success {
+            eprintln!("Failed to run game");
+        }
+
+        let _ = std::fs::remove_file(cheats_path.to_str().unwrap());
+
+        weak.upgrade_in_event_loop(move |handle| {
+            if let Some(rom_dir) = file_path.parent().unwrap().to_str() {
+                handle.set_rom_dir(rom_dir.into());
+            }
+            handle.set_game_running(false);
+        })
+        .unwrap();
+    });
+}
+
+fn open_rom(app: &AppWindow, controller_paths: &[Option<String>]) {
+    let rom_dir = app.get_rom_dir();
+    let select_rom = if !rom_dir.is_empty()
+        && let Ok(exists) = std::fs::exists(&rom_dir)
+        && exists
+    {
+        rfd::AsyncFileDialog::new().set_directory(rom_dir)
+    } else {
+        rfd::AsyncFileDialog::new()
+    }
+    .set_title("Select ROM")
+    .add_filter("ROM files", &N64_EXTENSIONS)
+    .pick_file();
+
+    let overclock = app.get_overclock_n64_cpu();
+    let disable_expansion_pak = app.get_disable_expansion_pak();
+    let ra_enabled = app.get_ra_enabled();
+    let ra_hardcore = app.get_ra_hardcore();
+    let ra_challenge = app.get_ra_challenge();
+    let ra_leaderboard = app.get_ra_leaderboard();
+
+    let weak = app.as_weak();
+    let controller_paths = controller_paths.to_owned();
+    tokio::spawn(async move {
+        if let Some(file) = select_rom.await {
+            let file_path = file.path().to_path_buf();
+            weak.upgrade_in_event_loop(move |handle| {
+                if handle.get_game_running() {
+                    return;
+                }
+                record_recent_rom(&handle, &file_path);
+                save_settings(&handle, &controller_paths);
+                run_rom(
+                    file_path,
+                    ui::GameSettings {
+                        overclock,
+                        disable_expansion_pak,
+                        cheats: std::collections::HashMap::new(), // will be filled in later
+                        load_savestate_slot: None,
+                    },
+                    None,
+                    RASettings {
+                        enabled: ra_enabled,
+                        hardcore: ra_hardcore,
+                        challenge: ra_challenge,
+                        leaderboard: ra_leaderboard,
+                    },
+                    handle.as_weak(),
+                );
+            })
+            .unwrap();
+        }
+    });
+}

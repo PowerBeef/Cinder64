@@ -1,0 +1,204 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: MIT
+
+import { StandardButton } from "std-widgets.slint";
+import { LocalGame, ControllerConfig, Netplay, Cheats, RetroAchievements, Settings, About } from "pages.slint";
+import { SideBar } from "side_bar.slint";
+import { SettingsData } from "settings_page.slint";
+import { RAData } from "retroachievements_page.slint";
+import { AboutData } from "about_page.slint";
+import { ControllerData } from "controller_page.slint";
+import { State, LibraryData } from "localgame_page.slint";
+import { CheatsData } from "cheat_page.slint";
+export { InputProfileDialog } from "input_profile.slint";
+export { VruDialog } from "vru_dialog.slint";
+export { NetplayCreate } from "netplay_create.slint";
+export { NetplayJoin } from "netplay_join.slint";
+export { NetplayWait } from "netplay_wait.slint";
+export { CustomNetplayServer } from "netplay_page.slint";
+export { DispatcherDialog } from "netplay_create.slint";
+
+export component AppWindow inherits Window {
+    callback wiki_button_clicked;
+    callback discord_button_clicked;
+    callback newversion_button_clicked;
+    callback open_recent_rom(string);
+    callback remove_recent_rom(string);
+    callback clear_recent_roms;
+    callback patreon_button_clicked;
+    callback github_sponsors_button_clicked;
+    callback source_code_button_clicked;
+    callback open_rom_button_clicked;
+    callback saves_folder_button_clicked;
+    callback input_profile_button_clicked;
+    callback transferpak_toggled(int,bool);
+    callback create_session_button_clicked;
+    callback join_session_button_clicked;
+    callback netplay_discord_button_clicked;
+    callback netplay_feedback_button_clicked;
+    callback cheats_select_rom_clicked(string);
+    callback cheats_clear_clicked;
+    callback cheat_toggled(string, string, string, bool);
+    callback ra_button_clicked(string);
+    callback ra_games_clicked;
+    callback ra_show_profile_clicked;
+    callback ra_toggled(bool,bool,bool,bool);
+    in property version <=> AboutData.version;
+    in property has_update <=> AboutData.has_update;
+    in-out property ra_username <=> RAData.ra_username;
+    in-out property ra_password <=> RAData.ra_password;
+    in-out property ra_logging_in <=> RAData.ra_logging_in;
+    in-out property ra_show_profile <=> RAData.ra_show_profile;
+    in-out property ra_current_user_message <=> RAData.current_user_message;
+    in-out property ra_enabled <=> RAData.enabled;
+    in-out property ra_hardcore <=> RAData.hardcore;
+    in-out property ra_challenge <=> RAData.challenge;
+    in-out property ra_leaderboard <=> RAData.leaderboard;
+    in-out property ra_softcore_only <=> RAData.ra_softcore_only;
+    in-out property integer_scaling <=> SettingsData.integer_scaling;
+    in-out property fullscreen <=> SettingsData.fullscreen;
+    in-out property widescreen <=> SettingsData.widescreen;
+    in-out property vsync <=> SettingsData.vsync;
+    in-out property apply_crt_shader <=> SettingsData.apply_crt_shader;
+    in-out property overclock_n64_cpu <=> SettingsData.overclock_n64_cpu;
+    in-out property disable_expansion_pak <=> SettingsData.disable_expansion_pak;
+    in-out property resolution <=> SettingsData.resolution;
+    in-out property emulate_usb <=> SettingsData.emulate_usb;
+    in-out property rom_dir <=> SettingsData.rom_dir;
+    in-out property emulate_vru <=> ControllerData.emulate_vru;
+    in-out property controller_enabled <=> ControllerData.controller_enabled;
+    in-out property controller_changed <=> ControllerData.controller_changed;
+    in-out property transferpak <=> ControllerData.transferpak;
+    in-out property gb_rom_paths <=> ControllerData.gb_rom_paths;
+    in-out property gb_ram_paths <=> ControllerData.gb_ram_paths;
+    in-out property selected_profile_binding <=> ControllerData.selected_profile_binding;
+    in-out property input_profiles <=> ControllerData.input_profiles;
+    in-out property controller_names <=> ControllerData.controller_names;
+    in-out property selected_controller <=> ControllerData.selected_controller;
+    in-out property game_running <=> State.game_running;
+    in-out property recent_roms <=> LibraryData.recent_roms;
+    in-out property blank_profiles <=> ControllerData.blank_profiles;
+    in-out property cheat_game_name <=> CheatsData.cheat_game_name;
+    in-out property cheat_game_crc <=> CheatsData.cheat_game_crc;
+    in-out property cheats <=> CheatsData.cheats;
+    preferred-width: 700px;
+    preferred-height: 500px;
+    title: @tr("Cinder64");
+    icon: @image-url("../../../data/icon/gopher64.png");
+
+    HorizontalLayout {
+        side-bar := SideBar {
+            title: @tr("Cinder64");
+            model: [
+                @tr("Menu" => "Library"),
+                @tr("Menu" => "Controllers"),
+                @tr("Menu" => "Netplay"),
+                @tr("Menu" => "Cheats"),
+                @tr("Menu" => "RetroAchievements"),
+                @tr("Menu" => "Settings"),
+                @tr("Menu" => "About")
+            ];
+        }
+
+        if(side-bar.current-item == 0): LocalGame {
+            open_rom_button_clicked => {
+                open_rom_button_clicked();
+            }
+            saves_folder_button_clicked => {
+                saves_folder_button_clicked();
+            }
+            newversion_button_clicked => {
+                newversion_button_clicked();
+            }
+            open_recent_rom(rom) => {
+                open_recent_rom(rom);
+            }
+            remove_recent_rom(rom) => {
+                remove_recent_rom(rom);
+            }
+            clear_recent_roms => {
+                clear_recent_roms();
+            }
+        }
+        if(side-bar.current-item == 1): ControllerConfig {
+            input_profile_button_clicked => {
+                input_profile_button_clicked();
+            }
+            transferpak_toggled(player,enabled) => {
+                transferpak_toggled(player,enabled);
+            }
+        }
+        if(side-bar.current-item == 2): Netplay {
+            create_session_button_clicked => {
+                create_session_button_clicked();
+            }
+            join_session_button_clicked => {
+                join_session_button_clicked();
+            }
+            netplay_discord_button_clicked => {
+                netplay_discord_button_clicked();
+            }
+            netplay_feedback_button_clicked => {
+                netplay_feedback_button_clicked();
+            }
+        }
+        if(side-bar.current-item == 3): Cheats {
+            cheats_select_rom_clicked(rom_dir) => {
+                cheats_select_rom_clicked(rom_dir);
+            }
+            cheats_clear_clicked => {
+                cheats_clear_clicked();
+            }
+            cheat_toggled(game_crc, cheat_name, option, enabled) => {
+                cheat_toggled(game_crc,cheat_name,option,enabled);
+            }
+        }
+        if(side-bar.current-item == 4): RetroAchievements {
+            ra_button_clicked(password) => {
+                ra_button_clicked(password);
+            }
+            ra_toggled(enabled,hardcore,challenge,leaderboard) => {
+                ra_toggled(enabled,hardcore,challenge,leaderboard);
+            }
+            ra_games_clicked => {
+                ra_games_clicked();
+            }
+            ra_show_profile_clicked => {
+                ra_show_profile_clicked();
+            }
+         }
+        if(side-bar.current-item == 5): Settings { }
+        if(side-bar.current-item == 6): About {
+            wiki_button_clicked => {
+                wiki_button_clicked();
+            }
+            discord_button_clicked => {
+                discord_button_clicked();
+            }
+            newversion_button_clicked => {
+                newversion_button_clicked();
+            }
+            patreon_button_clicked => {
+                patreon_button_clicked();
+            }
+            github_sponsors_button_clicked => {
+                github_sponsors_button_clicked();
+            }
+            source_code_button_clicked => {
+                source_code_button_clicked();
+            }
+        }
+    }
+}
+
+export component ErrorDialog inherits Dialog {
+    in-out property <string> text;
+    title: @tr("Error");
+    Text {
+        text: text;
+    }
+
+    StandardButton {
+        kind: close;
+    }
+}

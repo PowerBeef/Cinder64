@@ -2,110 +2,83 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ["main"]
   pull_request:
-    branches: [main]
+    branches: ["main"]
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "15.0"
 
 jobs:
-  swift-test:
-    name: swift test
-    runs-on: macos-26
-    timeout-minutes: 25
-
+  rust:
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
-          # Full checkout so the vendored ThirdParty/gopher64 submodule-ish
-          # tree is visible to swift build. Cinder64 does not currently
-          # use git submodules (gopher64 is copied in-tree), but keep the
-          # fetch deep enough that future submodule adoption works.
-          fetch-depth: 1
+          submodules: recursive
+          fetch-depth: 0
 
-      - name: Print tool versions
-        run: |
-          swift --version
-          xcodebuild -version
-          rustc --version || true
-          cargo --version || true
-
-      - name: Run default test lane
-        run: ./script/test_all.sh --artifacts test-artifacts/ci-default
-
-      - name: Upload default test artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          name: default-test-artifacts
-          path: test-artifacts/ci-default
+          rustflags: ""
+          cache: true
 
-  rust-bridge-test:
-    name: rust bridge tests
-    runs-on: macos-26
-    timeout-minutes: 35
+      - name: Format
+        run: cargo fmt --check
 
+      - name: Test
+        run: cargo test
+
+      - name: Release build
+        run: cargo build --release
+
+  macos-bundle:
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache Cargo outputs
-        uses: actions/cache@v4
+      - uses: actions/checkout@v6
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ThirdParty/gopher64/cinder64_bridge/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('ThirdParty/gopher64/cinder64_bridge/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          submodules: recursive
+          fetch-depth: 0
 
-      - name: Run Rust bridge tests
-        run: |
-          set -o pipefail
-          mkdir -p test-artifacts/rust-bridge
-          cargo test --manifest-path ThirdParty/gopher64/cinder64_bridge/Cargo.toml 2>&1 | tee test-artifacts/rust-bridge/cargo-test.log
-
-      - name: Upload Rust bridge artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          name: rust-bridge-test-artifacts
-          path: test-artifacts/rust-bridge
+          target: aarch64-apple-darwin
+          rustflags: ""
+          cache: true
 
-  bundle-assembly:
-    name: bundle assembly smoke
-    runs-on: macos-26
-    timeout-minutes: 30
-    # MoltenVK / libpng / freetype aren't installed on the runner by
-    # default. Install via Homebrew and expose paths via the env vars
-    # BundledGopher64RuntimeLocator respects so the bundler can find
-    # them without brew --prefix lookups at build time.
-    needs: [swift-test, rust-bridge-test]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install runtime dependencies
+      - name: Install bundle dependencies
         run: |
           brew install molten-vk freetype libpng
+          cargo install cargo-bundle
 
-      - name: Prepare .app bundle (no launch)
-        # --prepare --print-bundle-path builds the Rust bridge (release),
-        # swift build, assembles dist/runs/<timestamp>/Cinder64.app,
-        # rewrites dylib paths + codesigns, validates, and prints the
-        # bundle path. This is the same path verify_launch_services_boot.sh
-        # uses internally, minus the ROM launch.
+      - name: Build unsigned macOS bundle
         run: |
-          ./script/build_and_run.sh --prepare --print-bundle-path
+          cargo build --release --no-default-features -v --target=aarch64-apple-darwin
+          mv target/aarch64-apple-darwin/release/gopher64 target/aarch64-apple-darwin/release/gopher64-cli
+          cargo bundle --release --target=aarch64-apple-darwin --format osx
+          cp target/aarch64-apple-darwin/release/gopher64-cli target/aarch64-apple-darwin/release/bundle/osx/Cinder64.app/Contents/MacOS/gopher64-cli
+          install_name_tool -change /opt/homebrew/opt/freetype/lib/libfreetype.6.dylib \
+            @executable_path/../Frameworks/libfreetype.6.dylib target/aarch64-apple-darwin/release/bundle/osx/Cinder64.app/Contents/MacOS/gopher64
+          install_name_tool -change /opt/homebrew/opt/freetype/lib/libfreetype.6.dylib \
+            @executable_path/../Frameworks/libfreetype.6.dylib target/aarch64-apple-darwin/release/bundle/osx/Cinder64.app/Contents/MacOS/gopher64-cli
+          install_name_tool -change /opt/homebrew/opt/libpng/lib/libpng16.16.dylib \
+            @executable_path/../Frameworks/libpng16.16.dylib target/aarch64-apple-darwin/release/bundle/osx/Cinder64.app/Contents/Frameworks/libfreetype.6.dylib
 
-      - name: Verify bundle structure
+      - name: Verify bundle
         run: |
-          BUNDLE="dist/Cinder64.app"
-          test -x "$BUNDLE/Contents/MacOS/Cinder64" || { echo "missing executable"; exit 1; }
-          for dylib in libcinder64_gopher64.dylib libMoltenVK.dylib libfreetype.6.dylib libpng16.16.dylib; do
-            test -f "$BUNDLE/Contents/Frameworks/$dylib" || { echo "missing $dylib"; exit 1; }
-          done
-          codesign --verify --deep --strict "$BUNDLE"
-          codesign --display --requirements - "$BUNDLE"
+          test -d target/aarch64-apple-darwin/release/bundle/osx/Cinder64.app
+          test -x target/aarch64-apple-darwin/release/bundle/osx/Cinder64.app/Contents/MacOS/gopher64
+          test -x target/aarch64-apple-darwin/release/bundle/osx/Cinder64.app/Contents/MacOS/gopher64-cli
+          test -f target/aarch64-apple-darwin/release/bundle/osx/Cinder64.app/Contents/Frameworks/libMoltenVK.dylib
+          test -f target/aarch64-apple-darwin/release/bundle/osx/Cinder64.app/Contents/Frameworks/libfreetype.6.dylib
+          test -f target/aarch64-apple-darwin/release/bundle/osx/Cinder64.app/Contents/Frameworks/libpng16.16.dylib
+          /usr/libexec/PlistBuddy -c "Print :CFBundleName" target/aarch64-apple-darwin/release/bundle/osx/Cinder64.app/Contents/Info.plist | grep -x Cinder64
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" target/aarch64-apple-darwin/release/bundle/osx/Cinder64.app/Contents/Info.plist | grep -x com.patricedery.Cinder64
+          codesign -f --entitlements data/macos/entitlements_dev.plist --deep --timestamp --options runtime -s - target/aarch64-apple-darwin/release/bundle/osx/Cinder64.app
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: Cinder64-macos-aarch64
+          path: target/aarch64-apple-darwin/release/bundle/osx/Cinder64.app

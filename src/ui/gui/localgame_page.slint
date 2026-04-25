@@ -1,0 +1,92 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: MIT
+
+import { Button, HorizontalBox, VerticalBox, GroupBox } from "std-widgets.slint";
+import { Page } from "page.slint";
+import { AboutData, NewVersionButton } from "about_page.slint";
+
+export struct RecentRom {
+    path: string,
+    title: string,
+}
+
+export global State {
+    in-out property <bool> game_running;
+}
+
+export global LibraryData {
+    in-out property <[RecentRom]> recent_roms;
+}
+
+export component LocalGame inherits Page {
+    callback open_rom_button_clicked;
+    callback saves_folder_button_clicked;
+    callback newversion_button_clicked;
+    callback open_recent_rom(string);
+    callback remove_recent_rom(string);
+    callback clear_recent_roms;
+    title: @tr("Library");
+
+    VerticalBox {
+        alignment: start;
+        HorizontalBox {
+            alignment: center;
+            Button {
+                text: @tr("Open ROM...");
+                enabled: !State.game_running;
+                primary: true;
+                clicked => {
+                    open_rom_button_clicked();
+                }
+            }
+        }
+
+        HorizontalBox {
+            alignment: center;
+            Button {
+                text: @tr("Open Saves Folder");
+                clicked => {
+                    saves_folder_button_clicked();
+                }
+            }
+        }
+
+        if AboutData.has_update:NewVersionButton {
+            newversion_button_clicked => {
+                newversion_button_clicked();
+            }
+        }
+        Rectangle { }
+
+        if LibraryData.recent_roms.length>0:HorizontalBox {
+            alignment: center;
+            GroupBox {
+                title: @tr("Recent ROMs");
+                VerticalLayout {
+                    alignment: space-between;
+                    for rom in LibraryData.recent_roms: HorizontalBox {
+                        Button {
+                            text: rom.title;
+                            enabled: !State.game_running;
+                            clicked => {
+                                open_recent_rom(rom.path);
+                            }
+                        }
+                        Button {
+                            text: @tr("Remove");
+                            clicked => {
+                                remove_recent_rom(rom.path);
+                            }
+                        }
+                    }
+                    Button {
+                        text: @tr("Clear Recent ROMs");
+                        clicked => {
+                            clear_recent_roms();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
