@@ -86,6 +86,7 @@ struct CloseGamePromptCard: View {
 
                 Button("Close Without Saving", action: closeWithoutSavingRequested)
                     .disabled(isBusy)
+                    .keyboardShortcut("d", modifiers: [.command])
 
                 Button("Save & Close", action: saveAndCloseRequested)
                     .buttonStyle(.borderedProminent)

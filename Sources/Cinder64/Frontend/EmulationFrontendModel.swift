@@ -127,6 +127,7 @@ final class EmulationFrontendModel {
         case let .openROM(url):
             try await prepareAndLaunchROM(url)
         case .returnHome:
+            logToolbarIntent("returnHome")
             closeGameCoordinator.requestCloseGame(.returnHome)
         case let .completePendingProtectedLaunch(shouldResumeProtectedSave):
             guard let pendingLaunch = closeGameCoordinator.resolvePendingLaunch(
@@ -139,24 +140,33 @@ final class EmulationFrontendModel {
                 loadProtectedCloseSave: pendingLaunch.shouldResumeProtectedSave
             )
         case .cancelCloseGame:
+            logToolbarIntent("cancelCloseGame")
             closeGameCoordinator.cancelCloseGame()
         case .closeWithoutSaving:
+            logToolbarIntent("closeWithoutSaving")
             await closeGameCoordinator.closeWithoutSaving()
         case .saveAndClose:
+            logToolbarIntent("saveAndClose")
             await closeGameCoordinator.saveAndClose()
         case .dismissWarning:
             session.dismissWarningBanner()
         case .pause:
+            logToolbarIntent("pause")
             try await session.pause()
         case .resume:
+            logToolbarIntent("resume")
             try await session.resume()
         case .reset:
+            logToolbarIntent("reset")
             try await session.reset()
         case let .saveState(slot):
+            logToolbarIntent("saveState slot=\(slot)")
             try await session.saveState(slot: slot)
         case let .loadState(slot):
+            logToolbarIntent("loadState slot=\(slot)")
             try await session.loadState(slot: slot)
         case .toggleMute:
+            logToolbarIntent("toggleMute")
             var settings = session.activeSettings
             settings.muteAudio.toggle()
             try await session.updateSettings(settings)
@@ -191,16 +201,20 @@ final class EmulationFrontendModel {
     }
 
     private func launchROM(url: URL, loadProtectedCloseSave: Bool) async throws {
-        let surface = try await renderSurfaceCoordinator.waitForValidSurface(
-            timeout: renderSurfaceWaitTimeout
-        )
-        try await session.openROM(url: url, renderSurface: surface)
+        try await session.openROM(url: url)
         if loadProtectedCloseSave {
             try await session.loadProtectedCloseState()
         }
         reactivateMainWindow()
         applyDisplayModeToWindow(MainWindowDisplayMode(settings: session.activeSettings))
         startScriptedKeyPlayback()
+    }
+
+    private func logToolbarIntent(_ message: String) {
+        session.persistenceStore.logStore.record(
+            "info",
+            "frontend toolbar intent \(message) state=\(session.snapshot.emulationState.rawValue)"
+        )
     }
 
     private func warningTitle(for intent: EmulationIntent) -> String {

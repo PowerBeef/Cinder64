@@ -38,6 +38,16 @@ final class EmulationSession {
     /// "just paused". Read-only to the outside world.
     var lifecycleState: RuntimeLifecycleState { lifecycle.state }
 
+    var runtimeShutdownPhaseDescription: String? {
+        let phaseURL = persistenceStore.directories.cacheDirectory.appending(path: "shutdown-phase.txt")
+        guard let value = try? String(contentsOf: phaseURL, encoding: .utf8) else {
+            return nil
+        }
+
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     init(
         coreHost: CoreHosting,
         persistenceStore: PersistenceStore,
@@ -340,7 +350,7 @@ final class EmulationSession {
     ) {
         persistenceStore.logStore.record(
             "warning",
-            "session shutdown failed; forcing Swift-side cleanup: \(error.localizedDescription)"
+            "session shutdown failed; forcing Swift-side cleanup shutdownPhase=\(runtimeShutdownPhaseDescription ?? "unknown") error=\(error.localizedDescription)"
         )
         deferredBootRenderSurface = nil
         snapshot = SessionSnapshot(

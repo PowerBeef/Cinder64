@@ -107,6 +107,43 @@ static std::atomic_uint32_t host_surface_width = 640;
 static std::atomic_uint32_t host_surface_height = 480;
 static std::string last_close_error;
 
+static void record_boundary_error(const char *label, const std::string &message) {
+  last_close_error = std::format("rdp_{} threw {}", label, message);
+  fprintf(stderr, "%s\n", last_close_error.c_str());
+  callback_emu_running.store(false);
+  callback_paused.store(false);
+}
+
+template <typename Operation>
+static bool run_guarded(const char *label, Operation &&operation) {
+  try {
+    operation();
+    return true;
+  } catch (const std::exception &exception) {
+    record_boundary_error(
+        label, std::format("std::exception: {}", exception.what()));
+    return false;
+  } catch (...) {
+    record_boundary_error(label, "a foreign exception");
+    return false;
+  }
+}
+
+template <typename Result, typename Operation>
+static Result guarded_value(const char *label, Result fallback,
+                            Operation &&operation) {
+  try {
+    return operation();
+  } catch (const std::exception &exception) {
+    record_boundary_error(
+        label, std::format("std::exception: {}", exception.what()));
+    return fallback;
+  } catch (...) {
+    record_boundary_error(label, "a foreign exception");
+    return fallback;
+  }
+}
+
 std::vector<bool> rdram_dirty;
 uint64_t sync_signal;
 
@@ -236,33 +273,38 @@ bool sdl_event_filter(void *userdata, SDL_Event *event) {
 }
 
 void rdp_new_processor(GFX_INFO _gfx_info) {
-  gfx_info = _gfx_info;
+  run_guarded("new_processor", [&] {
+    gfx_info = _gfx_info;
 
-  sync_signal = 0;
-  rdram_dirty.assign(gfx_info.RDRAM_SIZE >> 3, false);
+    sync_signal = 0;
+    rdram_dirty.assign(gfx_info.RDRAM_SIZE >> 3, false);
 
-  if (processor) {
-    delete processor;
-  }
-  RDP::CommandProcessorFlags flags = 0;
+    if (processor) {
+      delete processor;
+    }
+    RDP::CommandProcessorFlags flags = 0;
 
-  if (gfx_info.upscale == 2) {
-    flags |= RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT;
-    flags |= RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_2X_BIT;
-  } else if (gfx_info.upscale == 4) {
-    flags |= RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT;
-    flags |= RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_4X_BIT;
-  } else if (gfx_info.upscale == 8) {
-    flags |= RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT;
-    flags |= RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_8X_BIT;
-  }
+    if (gfx_info.upscale == 2) {
+      flags |= RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT;
+      flags |= RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_2X_BIT;
+    } else if (gfx_info.upscale == 4) {
+      flags |= RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT;
+      flags |= RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_4X_BIT;
+    } else if (gfx_info.upscale == 8) {
+      flags |= RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT;
+      flags |= RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_8X_BIT;
+    }
 
-  processor = new RDP::CommandProcessor(wsi->get_device(), gfx_info.RDRAM, 0,
-                                        gfx_info.RDRAM_SIZE,
-                                        gfx_info.RDRAM_SIZE / 2, flags);
+    processor = new RDP::CommandProcessor(wsi->get_device(), gfx_info.RDRAM, 0,
+                                          gfx_info.RDRAM_SIZE,
+                                          gfx_info.RDRAM_SIZE / 2, flags);
+  });
 }
 
-bool rdp_is_ready() { return window && processor && wsi_platform && wsi; }
+bool rdp_is_ready() {
+  return guarded_value<bool>(
+      "is_ready", false, [] { return window && processor && wsi_platform && wsi; });
+}
 
 static ImageHandle create_message_image(Vulkan::Device &device, int width,
                                         TTF_Font *font, const char *message) {
@@ -287,7 +329,8 @@ static ImageHandle create_message_image(Vulkan::Device &device, int width,
 
 void rdp_init(void *_window, GFX_INFO _gfx_info, const void *font,
               size_t font_size, uint32_t save_state_slot) {
-  memset(&rdp_device, 0, sizeof(RDP_DEVICE));
+  run_guarded("init", [&] {
+    memset(&rdp_device, 0, sizeof(RDP_DEVICE));
 
   window = (SDL_Window *)_window;
   bool result = SDL_AddEventWatch(sdl_event_filter, nullptr);
@@ -332,6 +375,11 @@ void rdp_init(void *_window, GFX_INFO _gfx_info, const void *font,
 
   rdp_new_processor(gfx_info);
 
+  if (!processor) {
+    rdp_close();
+    return;
+  }
+
   if (!processor->device_is_supported()) {
     rdp_close();
     return;
@@ -368,28 +416,14 @@ void rdp_init(void *_window, GFX_INFO _gfx_info, const void *font,
   achievement_challenge_indicators.clear();
   leaderboard_trackers.clear();
   achievement_challenge_indicator_image = Vulkan::ImageHandle();
-  achievement_progress_indicator_image = Vulkan::ImageHandle();
+    achievement_progress_indicator_image = Vulkan::ImageHandle();
+  });
 }
 
 void rdp_close() {
   last_close_error.clear();
   auto run_close_step = [](const char *label, auto &&operation) {
-    try {
-      operation();
-      return true;
-    } catch (const std::exception &exception) {
-      last_close_error =
-          std::format("rdp_close {} threw std::exception: {}", label,
-                      exception.what());
-      fprintf(stderr, "rdp_close %s threw std::exception: %s\n", label,
-              exception.what());
-      return false;
-    } catch (...) {
-      last_close_error = std::format("rdp_close {} threw a foreign exception",
-                                     label);
-      fprintf(stderr, "rdp_close %s threw a foreign exception\n", label);
-      return false;
-    }
+    return run_guarded(label, operation);
   };
 
   messages = std::queue<Message>();
@@ -459,34 +493,40 @@ void rdp_request_shutdown() {
 }
 
 void rdp_set_fullscreen(bool fullscreen) {
-  gfx_info.fullscreen = fullscreen;
-  if (window) {
-    SDL_SetWindowFullscreen(window, fullscreen);
-  }
+  run_guarded("set_fullscreen", [&] {
+    gfx_info.fullscreen = fullscreen;
+    if (window) {
+      SDL_SetWindowFullscreen(window, fullscreen);
+    }
+  });
 }
 
 void rdp_set_host_viewport(uint32_t width, uint32_t height) {
-  host_surface_width.store(width > 0 ? width : 1);
-  host_surface_height.store(height > 0 ? height : 1);
-  if (wsi_platform) {
-    wsi_platform->set_surface_size(host_surface_width.load(), host_surface_height.load());
-    wsi_platform->do_resize();
-  }
+  run_guarded("set_host_viewport", [&] {
+    host_surface_width.store(width > 0 ? width : 1);
+    host_surface_height.store(height > 0 ? height : 1);
+    if (wsi_platform) {
+      wsi_platform->set_surface_size(host_surface_width.load(), host_surface_height.load());
+      wsi_platform->do_resize();
+    }
+  });
 }
 
 bool rdp_rebind_window(void *_window, uint32_t width, uint32_t height) {
-  if (!_window || !wsi_platform) {
-    return false;
-  }
+  return guarded_value<bool>("rebind_window", false, [&] {
+    if (!_window || !wsi_platform) {
+      return false;
+    }
 
-  window = (SDL_Window *)_window;
-  host_surface_width.store(width > 0 ? width : 1);
-  host_surface_height.store(height > 0 ? height : 1);
-  wsi_platform->set_window(window);
-  wsi_platform->set_surface_size(host_surface_width.load(),
-                                 host_surface_height.load());
-  wsi_platform->do_resize();
-  return true;
+    window = (SDL_Window *)_window;
+    host_surface_width.store(width > 0 ? width : 1);
+    host_surface_height.store(height > 0 ? height : 1);
+    wsi_platform->set_window(window);
+    wsi_platform->set_surface_size(host_surface_width.load(),
+                                   host_surface_height.load());
+    wsi_platform->do_resize();
+    return true;
+  });
 }
 
 static void calculate_viewport(float *x, float *y, float *width, float *height,
@@ -651,17 +691,28 @@ static void render_frame(Vulkan::Device &device) {
 }
 
 void rdp_set_vi_register(uint32_t reg, uint32_t value) {
-  processor->set_vi_register(RDP::VIRegister(reg), value);
+  run_guarded("set_vi_register", [&] {
+    if (processor)
+      processor->set_vi_register(RDP::VIRegister(reg), value);
+  });
 }
 
 void rdp_render_frame() {
-  auto &device = wsi->get_device();
-  render_frame(device);
+  run_guarded("render_frame", [&] {
+    if (!wsi)
+      return;
+    auto &device = wsi->get_device();
+    render_frame(device);
+  });
 }
 
 void rdp_update_screen() {
-  wsi->end_frame();
-  wsi->begin_frame();
+  run_guarded("update_screen", [&] {
+    if (!wsi)
+      return;
+    wsi->end_frame();
+    wsi->begin_frame();
+  });
 }
 
 CALL_BACK rdp_check_callback() {
@@ -669,7 +720,10 @@ CALL_BACK rdp_check_callback() {
 }
 
 void rdp_check_framebuffers(uint32_t address, uint32_t length) {
-  if (sync_signal) {
+  run_guarded("check_framebuffers", [&] {
+    if (!processor)
+      return;
+    if (sync_signal) {
     address >>= 3;
     length = (length + 7) >> 3;
 
@@ -687,17 +741,26 @@ void rdp_check_framebuffers(uint32_t address, uint32_t length) {
       sync_signal = 0;
     }
   }
+  });
 }
 
 size_t rdp_state_size() { return sizeof(RDP_DEVICE); }
 
 void rdp_save_state(uint8_t *state) {
-  processor->wait_for_timeline(processor->signal_timeline());
-  memcpy(state, &rdp_device, sizeof(RDP_DEVICE));
+  run_guarded("save_state", [&] {
+    if (!processor || !state)
+      return;
+    processor->wait_for_timeline(processor->signal_timeline());
+    memcpy(state, &rdp_device, sizeof(RDP_DEVICE));
+  });
 }
 
 void rdp_load_state(const uint8_t *state) {
-  memcpy(&rdp_device, state, sizeof(RDP_DEVICE));
+  run_guarded("load_state", [&] {
+    if (!state)
+      return;
+    memcpy(&rdp_device, state, sizeof(RDP_DEVICE));
+  });
 }
 
 static void push_onscreen_message(void *message) {
@@ -707,9 +770,13 @@ static void push_onscreen_message(void *message) {
 }
 
 void rdp_onscreen_message(const char *message, bool long_message) {
-  SDL_RunOnMainThread(push_onscreen_message, (void *)message, true);
-  if (long_message)
+  run_guarded("onscreen_message", [&] {
+    if (!message)
+      return;
     SDL_RunOnMainThread(push_onscreen_message, (void *)message, true);
+    if (long_message)
+      SDL_RunOnMainThread(push_onscreen_message, (void *)message, true);
+  });
 }
 
 uint32_t pixel_size(uint32_t pixel_type, uint32_t area) {
@@ -729,9 +796,12 @@ uint32_t pixel_size(uint32_t pixel_type, uint32_t area) {
 }
 
 uint64_t rdp_process_commands() {
-  uint64_t interrupt_timer = 0;
-  const uint32_t DP_CURRENT = *gfx_info.DPC_CURRENT_REG & 0x00FFFFF8;
-  const uint32_t DP_END = *gfx_info.DPC_END_REG & 0x00FFFFF8;
+  return guarded_value<uint64_t>("process_commands", 0, [&] {
+    if (!processor)
+      return uint64_t(0);
+    uint64_t interrupt_timer = 0;
+    const uint32_t DP_CURRENT = *gfx_info.DPC_CURRENT_REG & 0x00FFFFF8;
+    const uint32_t DP_END = *gfx_info.DPC_END_REG & 0x00FFFFF8;
 
   int length = DP_END - DP_CURRENT;
   if (length <= 0)
@@ -938,7 +1008,8 @@ uint64_t rdp_process_commands() {
   rdp_device.cmd_cur = 0;
   *gfx_info.DPC_CURRENT_REG = *gfx_info.DPC_END_REG;
 
-  return interrupt_timer;
+    return interrupt_timer;
+  });
 }
 
 static void update_challenge_indicator() {

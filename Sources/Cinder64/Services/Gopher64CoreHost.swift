@@ -495,6 +495,21 @@ private final class Gopher64CoreExecutor {
             )
             self.bridge = nil
             self.session = nil
+        } catch let error as Gopher64BridgeError {
+            switch error {
+            case let .commandFailed(context, status, message)
+                where context == "stopping emulation" &&
+                (status == .timeout || status == .panic || status == .runtimeError):
+                logStore.record(
+                    "warning",
+                    "gopher64 bridge stop failed with \(status.description); dropping poisoned session handle: \(message)"
+                )
+                self.bridge = nil
+                self.session = nil
+                throw error
+            default:
+                throw error
+            }
         }
     }
 

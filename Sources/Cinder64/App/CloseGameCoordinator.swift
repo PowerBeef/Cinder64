@@ -149,14 +149,25 @@ final class CloseGameCoordinator {
         setClosePrompt(prompt)
 
         do {
+            session.persistenceStore.logStore.record(
+                "info",
+                "close-game stop starting intent=\(intent.rawValue)"
+            )
             try await session.stop()
+            session.persistenceStore.logStore.record(
+                "info",
+                "close-game stop finished intent=\(intent.rawValue)"
+            )
             session.persistenceStore.logStore.record("info", "close-game completed intent=\(intent.rawValue)")
             setClosePrompt(nil)
             onConfirmedExit?(intent)
         } catch {
             prompt.phase = .idle
             prompt.errorMessage = error.localizedDescription
-            session.persistenceStore.logStore.record("error", "close-game failed intent=\(intent.rawValue) error=\(error.localizedDescription)")
+            session.persistenceStore.logStore.record(
+                "error",
+                "close-game failed intent=\(intent.rawValue) shutdownPhase=\(session.runtimeShutdownPhaseDescription ?? "unknown") error=\(error.localizedDescription)"
+            )
             setClosePrompt(prompt)
         }
     }

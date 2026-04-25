@@ -16,6 +16,9 @@ struct EmulationFrontendModelTests {
             closeGameCoordinator: closeCoordinator,
             renderSurfaceCoordinator: surfaceCoordinator
         )
+        surfaceCoordinator.onSurfaceChanged = { descriptor in
+            frontend.send(.renderSurfaceChanged(descriptor))
+        }
         let romURL = try ROMFixture.writeROM(named: "Intent Pilot.z64", in: persistence.directory)
 
         let launchTask = Task { @MainActor in
@@ -23,6 +26,10 @@ struct EmulationFrontendModelTests {
         }
         await yieldToQueuedTasks()
 
+        await waitForCondition("booting launch state") {
+            frontend.state.snapshot.emulationState == .booting
+        }
+        #expect(frontend.state.snapshot.activeROM?.displayName == "Intent Pilot")
         #expect(core.events.isEmpty)
 
         surfaceCoordinator.publishSurface(.testSurface())
@@ -41,6 +48,7 @@ struct EmulationFrontendModelTests {
         await fixture.frontend.handle(.reset)
         await fixture.frontend.handle(.saveState(slot: 2))
         await fixture.frontend.handle(.loadState(slot: 1))
+        await fixture.frontend.handle(.toggleMute)
 
         #expect(fixture.core.events == [
             .pause,
@@ -49,7 +57,23 @@ struct EmulationFrontendModelTests {
             .setSaveSlot(2),
             .saveState,
             .loadState(1),
+            .updateSettings(fixture.frontend.state.activeSettings),
         ])
+        #expect(fixture.frontend.state.activeSettings.muteAudio == true)
+    }
+
+    @Test func returnHomeIntentShowsClosePromptAndDoesNotStopImmediately() async throws {
+        let fixture = try makeFrontendFixture()
+        let romURL = try ROMFixture.writeROM(named: "Toolbar Return.z64", in: fixture.persistence.directory)
+
+        try await fixture.session.openROM(url: romURL, renderSurface: .testSurface())
+        fixture.core.events.removeAll()
+
+        await fixture.frontend.handle(.returnHome)
+
+        #expect(fixture.frontend.state.closePrompt?.intent == .returnHome)
+        #expect(fixture.frontend.state.closePrompt?.phase == .idle)
+        #expect(fixture.core.events.isEmpty)
     }
 
     @Test func displayModeIntentUpdatesSettingsAndAppliesWindowMode() async throws {

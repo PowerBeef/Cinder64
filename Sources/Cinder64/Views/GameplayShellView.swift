@@ -16,6 +16,8 @@ struct GameplayShellView: View {
     let toggleMuteRequested: () -> Void
 
     @State private var selectedSlot: Int
+    @State private var isStatePopoverPresented = false
+    @State private var isDisplayPopoverPresented = false
 
     init(
         snapshot: SessionSnapshot,
@@ -49,11 +51,44 @@ struct GameplayShellView: View {
     }
 
     var body: some View {
-        ActiveGameplayView(
-            snapshot: snapshot,
-            displayMode: displayMode,
-            renderSurfaceCoordinator: renderSurfaceCoordinator
-        )
+        ZStack(alignment: .topTrailing) {
+            ActiveGameplayView(
+                snapshot: snapshot,
+                displayMode: displayMode,
+                renderSurfaceCoordinator: renderSurfaceCoordinator
+            )
+
+            if isStatePopoverPresented {
+                GameplayStatePopoverContent(
+                    selectedSlot: $selectedSlot,
+                    saveStateRequested: { slot in
+                        closeToolbarPopovers()
+                        saveStateRequested(slot)
+                    },
+                    loadStateRequested: { slot in
+                        closeToolbarPopovers()
+                        loadStateRequested(slot)
+                    }
+                )
+                .padding(.top, 12)
+                .padding(.trailing, 132)
+                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topTrailing)))
+                .zIndex(2)
+            }
+
+            if isDisplayPopoverPresented {
+                GameplayDisplayPopoverContent(
+                    displayMode: displayMode,
+                    applyDisplayMode: { mode in
+                        closeToolbarPopovers()
+                        applyDisplayMode(mode)
+                    }
+                )
+                .padding(.top, 12)
+                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topTrailing)))
+                .zIndex(2)
+            }
+        }
         .allowsHitTesting(isClosePromptVisible == false)
         .padding(14)
         .toolbar {
@@ -79,22 +114,11 @@ struct GameplayShellView: View {
                 }
                 .disabled(isClosePromptVisible || actionAvailability.canReset == false)
 
-                Menu {
-                    Button("Save to Slot \(selectedSlot + 1)") {
-                        saveStateRequested(selectedSlot)
-                    }
-
-                    Button("Load Slot \(selectedSlot + 1)") {
-                        loadStateRequested(selectedSlot)
-                    }
-
-                    Divider()
-
-                    ForEach(0 ..< 4, id: \.self) { slot in
-                        Button("Use Slot \(slot + 1)") {
-                            selectedSlot = slot
-                        }
-                    }
+                Button {
+                    setToolbarPopoverVisibility(
+                        state: isStatePopoverPresented == false,
+                        display: false
+                    )
                 } label: {
                     GameplayToolbarItemLabel(
                         title: SessionToolbarPresentation.stateMenuTitle(forSlot: selectedSlot),
@@ -117,13 +141,11 @@ struct GameplayShellView: View {
                 }
                 .disabled(isClosePromptVisible || actionAvailability.canToggleAudio == false)
 
-                Menu {
-                    ForEach(MainWindowDisplayMode.allCases, id: \.self) { mode in
-                        Button(mode.title) {
-                            applyDisplayMode(mode)
-                        }
-                        .disabled(displayMode == mode)
-                    }
+                Button {
+                    setToolbarPopoverVisibility(
+                        state: false,
+                        display: isDisplayPopoverPresented == false
+                    )
                 } label: {
                     GameplayToolbarItemLabel(
                         title: SessionToolbarPresentation.compactDisplayTitle(for: displayMode),
@@ -136,6 +158,11 @@ struct GameplayShellView: View {
         .onChange(of: snapshot.activeSaveSlot) { _, newValue in
             selectedSlot = newValue
         }
+        .onChange(of: isClosePromptVisible) { _, isVisible in
+            if isVisible {
+                closeToolbarPopovers()
+            }
+        }
     }
 
     private func transportAction() {
@@ -144,6 +171,16 @@ struct GameplayShellView: View {
         } else {
             pauseRequested()
         }
+    }
+
+    private func closeToolbarPopovers() {
+        setToolbarPopoverVisibility(state: false, display: false)
+    }
+
+    private func setToolbarPopoverVisibility(state: Bool, display: Bool) {
+        isStatePopoverPresented = state
+        isDisplayPopoverPresented = display
+        renderSurfaceCoordinator.setPromptVisible(state || display || isClosePromptVisible)
     }
 }
 
@@ -197,5 +234,90 @@ private struct GameplayToolbarItemLabel: View {
             .font(.subheadline.weight(.semibold))
             .labelStyle(.titleAndIcon)
             .lineLimit(1)
+    }
+}
+
+private struct GameplayStatePopoverContent: View {
+    @Binding var selectedSlot: Int
+    let saveStateRequested: (Int) -> Void
+    let loadStateRequested: (Int) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("State")
+                .font(.headline.weight(.semibold))
+
+            HStack(spacing: 8) {
+                ForEach(0 ..< 4, id: \.self) { slot in
+                    Button("Slot \(slot + 1)") {
+                        selectedSlot = slot
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(slot == selectedSlot ? ShellPalette.accent : Color.secondary.opacity(0.35))
+                }
+            }
+
+            Divider()
+
+            Button {
+                saveStateRequested(selectedSlot)
+            } label: {
+                Label("Save to Slot \(selectedSlot + 1)", systemImage: "square.and.arrow.down")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(ShellPalette.accent)
+
+            Button {
+                loadStateRequested(selectedSlot)
+            } label: {
+                Label("Load Slot \(selectedSlot + 1)", systemImage: "arrow.down.square")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(14)
+        .frame(width: 250)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(ShellPalette.strongLine)
+        }
+        .shadow(color: Color.black.opacity(0.22), radius: 18, y: 8)
+    }
+}
+
+private struct GameplayDisplayPopoverContent: View {
+    let displayMode: MainWindowDisplayMode
+    let applyDisplayMode: (MainWindowDisplayMode) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Display")
+                .font(.headline.weight(.semibold))
+
+            ForEach(MainWindowDisplayMode.allCases, id: \.self) { mode in
+                Button {
+                    applyDisplayMode(mode)
+                } label: {
+                    Label(
+                        mode.title,
+                        systemImage: displayMode == mode ? "checkmark" : "display"
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.bordered)
+                .disabled(displayMode == mode)
+            }
+        }
+        .padding(14)
+        .frame(width: 220)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(ShellPalette.strongLine)
+        }
+        .shadow(color: Color.black.opacity(0.22), radius: 18, y: 8)
     }
 }

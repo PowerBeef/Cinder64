@@ -2,9 +2,9 @@ use gopher64::{device, ui};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -246,6 +246,7 @@ pub struct BridgeSession {
     present_count: u64,
     pending_command_count: u64,
     last_metrics_sample_at: Option<Instant>,
+    poisoned: bool,
 }
 
 impl BridgeSession {
@@ -279,6 +280,7 @@ impl BridgeSession {
             present_count: 0,
             pending_command_count: 0,
             last_metrics_sample_at: None,
+            poisoned: false,
         }
     }
 
@@ -326,6 +328,31 @@ impl BridgeSession {
                 .lock()
                 .map(|status| status.active)
                 .unwrap_or(false)
+    }
+
+    fn mark_poisoned(&mut self, status_code: i32, message: impl AsRef<str>) {
+        self.poisoned = true;
+        self.last_error = sanitize_c_string(message.as_ref());
+        self.last_error_code = status_code as u32;
+        if let Ok(mut status) = self.runtime_status.lock() {
+            status.active = false;
+            status.running = false;
+            status.paused = false;
+            status.shutdown_requested = false;
+            status.frame_rate = 0.0;
+            status.last_error = Some(message.as_ref().to_string());
+        }
+    }
+
+    fn ensure_not_poisoned(&self) -> Result<(), String> {
+        if self.poisoned {
+            Err(
+                "The previous embedded gopher64 runtime shutdown did not complete cleanly; create a fresh bridge session before opening another ROM."
+                    .to_string(),
+            )
+        } else {
+            Ok(())
+        }
     }
 
     fn metrics(&self) -> Cinder64Metrics {
@@ -379,9 +406,7 @@ fn update_measured_frame_rate(
     session.render_frame_count = session
         .render_frame_count
         .saturating_add(frames_rendered as u64);
-    session.present_count = session
-        .present_count
-        .saturating_add(frames_rendered as u64);
+    session.present_count = session.present_count.saturating_add(frames_rendered as u64);
     session.vi_count = session.vi_count.saturating_add(vi_events as u64);
     if vi_events == 0 {
         return None;
@@ -500,7 +525,8 @@ fn determine_surface_apply_action(
     match last_applied {
         None => SurfaceApplyAction::Attach,
         Some(applied)
-            if applied.revision == incoming.revision || applied.matches_committed_geometry(incoming) =>
+            if applied.revision == incoming.revision
+                || applied.matches_committed_geometry(incoming) =>
         {
             SurfaceApplyAction::NoOp
         }
@@ -509,11 +535,7 @@ fn determine_surface_apply_action(
     }
 }
 
-fn surface_event_message(
-    action: &str,
-    surface: &HostSurfaceDescriptor,
-    details: &str,
-) -> String {
+fn surface_event_message(action: &str, surface: &HostSurfaceDescriptor, details: &str) -> String {
     format!(
         "render-surface action={action} surface_id={} generation={} revision={} logical={}x{} pixel={}x{} scale={:.2} {details}",
         surface.surface_id,
@@ -630,31 +652,26 @@ fn spawn_runtime_thread(
             };
 
             let runtime_status_for_ready = Arc::clone(&runtime_status);
-            device::run_game_with_ready_hook(
-                &mut device,
-                &rom_contents,
-                game_settings,
-                |device| {
-                    let frame_rate = if device.vi.frame_time > 0.0 {
-                        1.0 / device.vi.frame_time
-                    } else {
-                        60.0
-                    };
+            device::run_game_with_ready_hook(&mut device, &rom_contents, game_settings, |device| {
+                let frame_rate = if device.vi.frame_time > 0.0 {
+                    1.0 / device.vi.frame_time
+                } else {
+                    60.0
+                };
 
-                    if let Ok(mut status) = runtime_status_for_ready.lock() {
-                        status.active = true;
-                        status.running = false;
-                        status.paused = true;
-                        status.shutdown_requested = false;
-                        status.frame_rate = frame_rate;
-                        status.last_error = None;
-                    }
+                if let Ok(mut status) = runtime_status_for_ready.lock() {
+                    status.active = true;
+                    status.running = false;
+                    status.paused = true;
+                    status.shutdown_requested = false;
+                    status.frame_rate = frame_rate;
+                    status.last_error = None;
+                }
 
-                    if let Some(signal) = startup_signal.take() {
-                        let _ = signal.send(Ok(frame_rate));
-                    }
-                },
-            );
+                if let Some(signal) = startup_signal.take() {
+                    let _ = signal.send(Ok(frame_rate));
+                }
+            });
 
             if let Some(message) = ui::video::last_close_error() {
                 if let Ok(mut status) = runtime_status.lock() {
@@ -676,8 +693,9 @@ fn spawn_runtime_thread(
             status.paused = false;
             status.shutdown_requested = false;
             if ready_was_reported && !shutdown_requested && status.last_error.is_none() {
-                status.last_error =
-                    Some("The embedded gopher64 runtime exited unexpectedly after boot.".to_string());
+                status.last_error = Some(
+                    "The embedded gopher64 runtime exited unexpectedly after boot.".to_string(),
+                );
             }
         }
 
@@ -730,12 +748,12 @@ fn join_with_timeout(thread: JoinHandle<()>, timeout: Duration) -> JoinOutcome {
 }
 
 fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
-    ui::video::set_hosted_mode(false);
-    ui::video::reset_runtime_counters();
     ui::input::reset_host_key_state();
     let should_destroy_window = should_destroy_sdl_window_on_stop(session.sdl_window_ownership);
 
     if session.emulation_thread.is_none() {
+        ui::video::set_hosted_mode(false);
+        ui::video::reset_runtime_counters();
         if should_destroy_window {
             if let Some(window) = session.sdl_window.take() {
                 ui::video::destroy_embedded_window(window.as_ptr());
@@ -763,16 +781,23 @@ fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
 
     if let Some(thread) = session.emulation_thread.take() {
         match join_with_timeout(thread, SHUTDOWN_JOIN_TIMEOUT) {
-            JoinOutcome::Completed => {}
+            JoinOutcome::Completed => {
+                ui::video::set_hosted_mode(false);
+                ui::video::reset_runtime_counters();
+            }
             JoinOutcome::Panicked => {
+                ui::video::set_hosted_mode(false);
+                ui::video::reset_runtime_counters();
                 panic_error =
                     Some("The embedded gopher64 runtime panicked while shutting down.".to_string());
             }
             JoinOutcome::TimedOut => {
                 // The emulation thread is wedged (commonly on a blocking Vulkan
                 // present under MoltenVK). The JoinHandle and joiner helper are
-                // leaked rather than stalling the host — the process is on its
-                // way out.
+                // leaked rather than stalling the host. Keep hosted mode active:
+                // the abandoned thread may still be inside the hosted callback
+                // boundary, and flipping it here can send SDL work down the wrong
+                // side of the bridge while teardown is already underway.
                 shutdown_timed_out = true;
             }
         }
@@ -823,19 +848,23 @@ fn stop_runtime(session: &mut BridgeSession) -> Result<(), String> {
     }
 
     if let Some(message) = panic_error {
+        session.mark_poisoned(STATUS_PANIC, &message);
         return Err(message);
     }
     if shutdown_timed_out {
-        return Err(format!(
+        let message = format!(
             "The embedded gopher64 runtime did not shut down within {} seconds; the runtime thread was abandoned so the host process can exit.",
             SHUTDOWN_JOIN_TIMEOUT.as_secs()
-        ));
+        );
+        session.mark_poisoned(STATUS_TIMEOUT, &message);
+        return Err(message);
     }
     if let Some(message) = shutdown_error {
         return Err(message);
     }
 
     session.clear_error();
+    session.poisoned = false;
     Ok(())
 }
 
@@ -870,6 +899,10 @@ pub unsafe extern "C" fn cinder64_bridge_attach_surface(
         return -1;
     };
 
+    if let Err(message) = session.ensure_not_poisoned() {
+        return session.set_error_with_status(STATUS_INVALID_STATE, message);
+    }
+
     let surface = HostSurfaceDescriptor {
         surface_id: 1,
         generation: 1,
@@ -884,9 +917,8 @@ pub unsafe extern "C" fn cinder64_bridge_attach_surface(
     };
 
     if !surface.is_valid() {
-        return session.set_error(
-            "The Swift host provided an invalid embedded render surface descriptor.",
-        );
+        return session
+            .set_error("The Swift host provided an invalid embedded render surface descriptor.");
     }
 
     if session.has_active_runtime() {
@@ -925,6 +957,10 @@ pub unsafe extern "C" fn cinder64_bridge_update_surface(
         return -1;
     };
 
+    if let Err(message) = session.ensure_not_poisoned() {
+        return session.set_error_with_status(STATUS_INVALID_STATE, message);
+    }
+
     let surface = HostSurfaceDescriptor {
         surface_id: 1,
         generation: 1,
@@ -939,9 +975,8 @@ pub unsafe extern "C" fn cinder64_bridge_update_surface(
     };
 
     if !surface.is_valid() {
-        return session.set_error(
-            "The Swift host provided an invalid embedded render surface descriptor.",
-        );
+        return session
+            .set_error("The Swift host provided an invalid embedded render surface descriptor.");
     }
 
     if !session.has_active_runtime() {
@@ -982,10 +1017,15 @@ pub unsafe extern "C" fn cinder64_bridge_open_rom(
     let Ok(session) = session_from_ptr(session) else {
         return -1;
     };
+    if let Err(message) = session.ensure_not_poisoned() {
+        return session.set_error_with_status(STATUS_INVALID_STATE, message);
+    }
 
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
         if session.emulation_thread.is_some() {
-            return Err("A ROM is already running inside the embedded gopher64 bridge.".to_string());
+            return Err(
+                "A ROM is already running inside the embedded gopher64 bridge.".to_string(),
+            );
         }
 
         let surface = session
@@ -1016,16 +1056,24 @@ pub unsafe extern "C" fn cinder64_bridge_open_rom(
         ui::video::ensure_video_subsystem_initialized();
         ui::video::load_vulkan_portability_library(molten_vk_library.as_deref())?;
         ui::video::set_host_viewport(surface.pixel_width, surface.pixel_height);
-        let (embedded_window, window_creation_details) = if let Some(existing_window) = session.sdl_window {
-            ui::video::sync_embedded_window(existing_window.as_ptr())?;
-            (existing_window, "viewport=ok sdl-window=reuse-ok wsi=initial-bind")
-        } else {
-            let embedded_window = ui::video::create_embedded_window(surface.embedded_window_descriptor())?;
-            let embedded_window = EmbeddedWindowHandle(embedded_window as usize);
-            session.sdl_window = Some(embedded_window);
-            session.sdl_window_ownership = SDLWindowOwnership::HostOwned;
-            (embedded_window, "viewport=ok sdl-window=create-ok wsi=initial-bind")
-        };
+        let (embedded_window, window_creation_details) =
+            if let Some(existing_window) = session.sdl_window {
+                ui::video::sync_embedded_window(existing_window.as_ptr())?;
+                (
+                    existing_window,
+                    "viewport=ok sdl-window=reuse-ok wsi=initial-bind",
+                )
+            } else {
+                let embedded_window =
+                    ui::video::create_embedded_window(surface.embedded_window_descriptor())?;
+                let embedded_window = EmbeddedWindowHandle(embedded_window as usize);
+                session.sdl_window = Some(embedded_window);
+                session.sdl_window_ownership = SDLWindowOwnership::HostOwned;
+                (
+                    embedded_window,
+                    "viewport=ok sdl-window=create-ok wsi=initial-bind",
+                )
+            };
 
         session.settings = RuntimeSettings {
             fullscreen: fullscreen != 0,
@@ -1094,7 +1142,10 @@ pub unsafe extern "C" fn cinder64_bridge_open_rom(
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = stop_runtime(session);
-                Err("The embedded gopher64 runtime stopped before it reported readiness.".to_string())
+                Err(
+                    "The embedded gopher64 runtime stopped before it reported readiness."
+                        .to_string(),
+                )
             }
         }
     }));
@@ -1155,7 +1206,9 @@ pub unsafe extern "C" fn cinder64_bridge_pump_events(session: *mut BridgeSession
                 let now = Instant::now();
                 let sample_due = session
                     .last_metrics_sample_at
-                    .map(|last_sample_at| now.saturating_duration_since(last_sample_at) >= Duration::from_secs(1))
+                    .map(|last_sample_at| {
+                        now.saturating_duration_since(last_sample_at) >= Duration::from_secs(1)
+                    })
                     .unwrap_or(true);
                 if sample_due {
                     let counters = ui::video::take_runtime_counters();
@@ -1326,7 +1379,14 @@ pub unsafe extern "C" fn cinder64_bridge_stop(session: *mut BridgeSession) -> i3
 
     match stop_runtime(session) {
         Ok(()) => 0,
-        Err(message) => session.set_error(message),
+        Err(message) => {
+            let status = if session.poisoned {
+                session.last_error_code as i32
+            } else {
+                STATUS_RUNTIME_ERROR
+            };
+            session.set_error_with_status(status, message)
+        }
     }
 }
 
@@ -1359,6 +1419,9 @@ pub unsafe extern "C" fn cinder64_bridge_attach_surface_v1(
     let Ok(session) = session_from_ptr(session) else {
         return STATUS_INVALID_ARGUMENT;
     };
+    if let Err(message) = session.ensure_not_poisoned() {
+        return session.set_error_with_status(STATUS_INVALID_STATE, message);
+    }
     let Some(descriptor) = descriptor.as_ref() else {
         return session.set_error_with_status(
             STATUS_INVALID_ARGUMENT,
@@ -1482,7 +1545,9 @@ pub extern "C" fn cinder64_bridge_version() -> *const c_char {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn cinder64_bridge_renderer_name(session: *mut BridgeSession) -> *const c_char {
+pub unsafe extern "C" fn cinder64_bridge_renderer_name(
+    session: *mut BridgeSession,
+) -> *const c_char {
     match session_from_ptr(session) {
         Ok(session) => session.renderer_name.as_ptr(),
         Err(_) => VERSION.as_ptr() as *const c_char,

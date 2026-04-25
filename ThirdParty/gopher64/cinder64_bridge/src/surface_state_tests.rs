@@ -1,13 +1,7 @@
 use crate::{
-    BridgeSession,
-    HostSurfaceDescriptor,
-    JoinOutcome,
-    SDLWindowOwnership,
-    SurfaceApplyAction,
-    determine_surface_apply_action,
-    join_with_timeout,
-    should_destroy_sdl_window_on_stop,
-    update_measured_frame_rate,
+    determine_surface_apply_action, join_with_timeout, should_destroy_sdl_window_on_stop,
+    update_measured_frame_rate, BridgeSession, HostSurfaceDescriptor, JoinOutcome,
+    SDLWindowOwnership, SurfaceApplyAction, STATUS_TIMEOUT,
 };
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
@@ -96,12 +90,16 @@ fn invalid_descriptor_is_rejected_cleanly() {
 
 #[test]
 fn host_owned_sdl_windows_are_preserved_when_stopping() {
-    assert!(!should_destroy_sdl_window_on_stop(SDLWindowOwnership::HostOwned));
+    assert!(!should_destroy_sdl_window_on_stop(
+        SDLWindowOwnership::HostOwned
+    ));
 }
 
 #[test]
 fn runtime_owned_sdl_windows_are_destroyed_when_stopping() {
-    assert!(should_destroy_sdl_window_on_stop(SDLWindowOwnership::RuntimeOwned));
+    assert!(should_destroy_sdl_window_on_stop(
+        SDLWindowOwnership::RuntimeOwned
+    ));
 }
 
 #[test]
@@ -121,6 +119,24 @@ fn measured_frame_rate_updates_after_a_one_second_sample_window() {
     assert_eq!(session.render_frame_count, 58);
     assert_eq!(session.present_count, 58);
     assert_eq!(session.vi_count, 60);
+}
+
+#[test]
+fn poisoned_session_rejects_new_runtime_launches() {
+    let mut session = BridgeSession::new();
+
+    session.mark_poisoned(STATUS_TIMEOUT, "shutdown timed out");
+
+    assert!(session.ensure_not_poisoned().is_err());
+    assert_eq!(session.last_error_code, STATUS_TIMEOUT as u32);
+    assert_eq!(
+        session
+            .runtime_status
+            .lock()
+            .map(|status| (status.active, status.running, status.paused))
+            .unwrap(),
+        (false, false, false)
+    );
 }
 
 #[test]
