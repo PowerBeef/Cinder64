@@ -271,7 +271,7 @@ fn main() {
         simd_build
             .std("c17")
             .flag("-D_POSIX_C_SOURCE=200112L")
-            .flag("-DSSE2NEON_SUPPRESS_WARNINGS")
+            .flag_if_supported("-Wno-unused-parameter")
             .file("src/compat/aarch64.c")
             .file(std::env::temp_dir().join("bindgen").join("extern.c"))
             .include(".")
