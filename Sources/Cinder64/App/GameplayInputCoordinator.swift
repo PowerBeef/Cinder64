@@ -2,7 +2,7 @@
 import Foundation
 
 @MainActor
-final class GameplayKeyboardMonitorCoordinator {
+final class GameplayInputCoordinator {
     typealias AddLocalMonitor = @MainActor (
         NSEvent.EventTypeMask,
         @escaping (NSEvent) -> NSEvent?
@@ -35,27 +35,13 @@ final class GameplayKeyboardMonitorCoordinator {
         },
         notificationCenter: NotificationCenter = .default,
         appActiveProvider: @escaping () -> Bool = { NSApp.isActive },
-        eventWindowMatcher: @escaping EventWindowMatcher = GameplayKeyboardMonitorCoordinator.event(_:matches:)
+        eventWindowMatcher: @escaping EventWindowMatcher = GameplayInputCoordinator.event(_:matches:)
     ) {
         self.addLocalMonitor = addLocalMonitor
         self.removeMonitor = removeMonitor
         self.notificationCenter = notificationCenter
         self.appActiveProvider = appActiveProvider
         self.eventWindowMatcher = eventWindowMatcher
-    }
-
-    func install(
-        session: EmulationSession,
-        closeGameCoordinator: CloseGameCoordinator
-    ) {
-        install(
-            eventHandler: { event in session.handleKeyboardInput(event) },
-            releaseHeldInput: { session.releaseKeyboardInput() },
-            emulationState: { session.snapshot.emulationState },
-            hasVisiblePrompt: {
-                closeGameCoordinator.closePrompt != nil || closeGameCoordinator.resumePrompt != nil
-            }
-        )
     }
 
     func install(

@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct RecentGamesListView: View {
-    @Bindable var session: EmulationSession
+    let recentGames: [RecentGameRecord]
     let openROMRequested: () -> Void
     let launchROMRequested: (URL) -> Void
 
@@ -19,7 +19,7 @@ struct RecentGamesListView: View {
                 }
             }
 
-            if session.recentGames.isEmpty {
+            if recentGames.isEmpty {
                 Section("Recent Launches") {
                     SidebarEmptyState(openROMRequested: openROMRequested)
                         .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 10, trailing: 12))
@@ -27,7 +27,7 @@ struct RecentGamesListView: View {
                 }
             } else {
                 Section("Recent Launches") {
-                    ForEach(session.recentGames, id: \.identity.id) { record in
+                    ForEach(recentGames, id: \.identity.id) { record in
                         Button {
                             launchROMRequested(record.identity.fileURL)
                         } label: {

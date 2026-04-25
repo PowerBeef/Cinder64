@@ -4,7 +4,7 @@ import Testing
 
 @MainActor
 @Suite
-struct GameplayKeyboardMonitorCoordinatorTests {
+struct GameplayInputCoordinatorTests {
     @Test func installIsIdempotentAndRemoveReleasesHeldInput() throws {
         let monitor = MonitorRecorder()
         var forwardedEvents: [EmbeddedKeyboardEvent] = []
@@ -15,7 +15,7 @@ struct GameplayKeyboardMonitorCoordinatorTests {
             backing: .buffered,
             defer: true
         )
-        let coordinator = GameplayKeyboardMonitorCoordinator(
+        let coordinator = GameplayInputCoordinator(
             addLocalMonitor: monitor.addLocalMonitor,
             removeMonitor: monitor.removeMonitor,
             notificationCenter: NotificationCenter(),
@@ -61,7 +61,7 @@ struct GameplayKeyboardMonitorCoordinatorTests {
             defer: true
         )
         var releaseCount = 0
-        let coordinator = GameplayKeyboardMonitorCoordinator(
+        let coordinator = GameplayInputCoordinator(
             addLocalMonitor: monitor.addLocalMonitor,
             removeMonitor: monitor.removeMonitor,
             notificationCenter: notificationCenter,
@@ -90,7 +90,7 @@ struct GameplayKeyboardMonitorCoordinatorTests {
     @Test func promptPresentationReleasesHeldInput() throws {
         let monitor = MonitorRecorder()
         var releaseCount = 0
-        let coordinator = GameplayKeyboardMonitorCoordinator(
+        let coordinator = GameplayInputCoordinator(
             addLocalMonitor: monitor.addLocalMonitor,
             removeMonitor: monitor.removeMonitor,
             notificationCenter: NotificationCenter(),

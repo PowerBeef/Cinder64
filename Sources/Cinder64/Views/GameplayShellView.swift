@@ -5,7 +5,7 @@ struct GameplayShellView: View {
     let displayMode: MainWindowDisplayMode
     let actionAvailability: SessionToolbarActionAvailability
     let isClosePromptVisible: Bool
-    let emulatorDisplayController: EmulatorDisplayController
+    let renderSurfaceCoordinator: RenderSurfaceCoordinator
     let returnHomeRequested: () -> Void
     let applyDisplayMode: (MainWindowDisplayMode) -> Void
     let pauseRequested: () -> Void
@@ -14,8 +14,6 @@ struct GameplayShellView: View {
     let saveStateRequested: (Int) -> Void
     let loadStateRequested: (Int) -> Void
     let toggleMuteRequested: () -> Void
-    let surfaceChanged: (RenderSurfaceDescriptor?) -> Void
-    let pumpRuntimeEvents: () -> Void
 
     @State private var selectedSlot: Int
 
@@ -24,7 +22,7 @@ struct GameplayShellView: View {
         displayMode: MainWindowDisplayMode,
         actionAvailability: SessionToolbarActionAvailability,
         isClosePromptVisible: Bool,
-        emulatorDisplayController: EmulatorDisplayController,
+        renderSurfaceCoordinator: RenderSurfaceCoordinator,
         returnHomeRequested: @escaping () -> Void,
         applyDisplayMode: @escaping (MainWindowDisplayMode) -> Void,
         pauseRequested: @escaping () -> Void,
@@ -32,15 +30,13 @@ struct GameplayShellView: View {
         resetRequested: @escaping () -> Void,
         saveStateRequested: @escaping (Int) -> Void,
         loadStateRequested: @escaping (Int) -> Void,
-        toggleMuteRequested: @escaping () -> Void,
-        surfaceChanged: @escaping (RenderSurfaceDescriptor?) -> Void,
-        pumpRuntimeEvents: @escaping () -> Void
+        toggleMuteRequested: @escaping () -> Void
     ) {
         self.snapshot = snapshot
         self.displayMode = displayMode
         self.actionAvailability = actionAvailability
         self.isClosePromptVisible = isClosePromptVisible
-        self.emulatorDisplayController = emulatorDisplayController
+        self.renderSurfaceCoordinator = renderSurfaceCoordinator
         self.returnHomeRequested = returnHomeRequested
         self.applyDisplayMode = applyDisplayMode
         self.pauseRequested = pauseRequested
@@ -49,8 +45,6 @@ struct GameplayShellView: View {
         self.saveStateRequested = saveStateRequested
         self.loadStateRequested = loadStateRequested
         self.toggleMuteRequested = toggleMuteRequested
-        self.surfaceChanged = surfaceChanged
-        self.pumpRuntimeEvents = pumpRuntimeEvents
         _selectedSlot = State(initialValue: snapshot.activeSaveSlot)
     }
 
@@ -58,9 +52,7 @@ struct GameplayShellView: View {
         ActiveGameplayView(
             snapshot: snapshot,
             displayMode: displayMode,
-            emulatorDisplayController: emulatorDisplayController,
-            surfaceChanged: surfaceChanged,
-            pumpRuntimeEvents: pumpRuntimeEvents
+            renderSurfaceCoordinator: renderSurfaceCoordinator
         )
         .allowsHitTesting(isClosePromptVisible == false)
         .padding(14)
@@ -158,9 +150,7 @@ struct GameplayShellView: View {
 private struct ActiveGameplayView: View {
     let snapshot: SessionSnapshot
     let displayMode: MainWindowDisplayMode
-    let emulatorDisplayController: EmulatorDisplayController
-    let surfaceChanged: (RenderSurfaceDescriptor?) -> Void
-    let pumpRuntimeEvents: () -> Void
+    let renderSurfaceCoordinator: RenderSurfaceCoordinator
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -170,9 +160,7 @@ private struct ActiveGameplayView: View {
 
             RenderSurfaceView(
                 snapshot: snapshot,
-                controller: emulatorDisplayController,
-                surfaceChanged: surfaceChanged,
-                pumpRuntimeEvents: pumpRuntimeEvents
+                coordinator: renderSurfaceCoordinator
             )
 
             SessionStatusStrip(

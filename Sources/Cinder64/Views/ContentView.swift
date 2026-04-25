@@ -1,71 +1,35 @@
 import SwiftUI
 
 struct ContentView: View {
-    @Bindable var session: EmulationSession
-    @Bindable var closeGameCoordinator: CloseGameCoordinator
-    let emulatorDisplayController: EmulatorDisplayController
-    let gameplayKeyboardMonitorCoordinator: GameplayKeyboardMonitorCoordinator
-    let openROMRequested: () -> Void
-    let returnHomeRequested: () -> Void
-    let completePendingProtectedLaunchRequested: (Bool) -> Void
-    let launchROMRequested: (URL) -> Void
-    let applyDisplayMode: (MainWindowDisplayMode) -> Void
-
-    private var displayMode: MainWindowDisplayMode {
-        MainWindowDisplayMode(settings: session.activeSettings)
-    }
-
-    private var actionAvailability: SessionToolbarActionAvailability {
-        SessionToolbarPresentation.actionAvailability(for: session.snapshot)
-    }
-
-    private var shellMode: ShellPresentationMode {
-        ShellPresentation.mode(for: session.snapshot)
-    }
+    @Bindable var frontend: EmulationFrontendModel
 
     var body: some View {
         Group {
-            switch shellMode {
+            switch frontend.state.shellMode {
             case .homeDashboard:
                 HomeShellView(
-                    session: session,
-                    isResumePromptVisible: closeGameCoordinator.resumePrompt != nil,
-                    openROMRequested: openROMRequested,
-                    launchROMRequested: launchROMRequested
+                    snapshot: frontend.state.snapshot,
+                    recentGames: frontend.state.recentGames,
+                    isResumePromptVisible: frontend.state.resumePrompt != nil,
+                    openROMRequested: { frontend.send(.chooseROM) },
+                    launchROMRequested: { frontend.send(.openROM($0)) },
+                    dismissWarningRequested: { frontend.send(.dismissWarning) }
                 )
             case .gameplay:
                 GameplayShellView(
-                    snapshot: session.snapshot,
-                    displayMode: displayMode,
-                    actionAvailability: actionAvailability,
-                    isClosePromptVisible: closeGameCoordinator.closePrompt != nil,
-                    emulatorDisplayController: emulatorDisplayController,
-                    returnHomeRequested: returnHomeRequested,
-                    applyDisplayMode: applyDisplayMode,
-                    pauseRequested: {
-                        Task { try? await session.pause() }
-                    },
-                    resumeRequested: {
-                        Task { try? await session.resume() }
-                    },
-                    resetRequested: {
-                        Task { try? await session.reset() }
-                    },
-                    saveStateRequested: { slot in
-                        Task { try? await session.saveState(slot: slot) }
-                    },
-                    loadStateRequested: { slot in
-                        Task { try? await session.loadState(slot: slot) }
-                    },
-                    toggleMuteRequested: {
-                        Task {
-                            var settings = session.activeSettings
-                            settings.muteAudio.toggle()
-                            try? await session.updateSettings(settings)
-                        }
-                    },
-                    surfaceChanged: session.updateRenderSurface,
-                    pumpRuntimeEvents: session.pumpRuntimeEvents
+                    snapshot: frontend.state.snapshot,
+                    displayMode: frontend.state.displayMode,
+                    actionAvailability: frontend.state.actionAvailability,
+                    isClosePromptVisible: frontend.state.closePrompt != nil,
+                    renderSurfaceCoordinator: frontend.renderSurfaceCoordinator,
+                    returnHomeRequested: { frontend.send(.returnHome) },
+                    applyDisplayMode: { frontend.send(.displayModeChanged($0)) },
+                    pauseRequested: { frontend.send(.pause) },
+                    resumeRequested: { frontend.send(.resume) },
+                    resetRequested: { frontend.send(.reset) },
+                    saveStateRequested: { frontend.send(.saveState(slot: $0)) },
+                    loadStateRequested: { frontend.send(.loadState(slot: $0)) },
+                    toggleMuteRequested: { frontend.send(.toggleMute) }
                 )
             }
         }
@@ -73,27 +37,23 @@ struct ContentView: View {
         // (that moved into a dedicated EmulatorDisplayWindow child), so
         // SwiftUI sheets on the main window composite correctly above any
         // gameplay content and work as expected for modal confirmation.
-        .sheet(item: $closeGameCoordinator.closePrompt) { prompt in
+        .sheet(item: closePromptBinding) { prompt in
             CloseGamePromptCard(
                 prompt: prompt,
-                cancelRequested: closeGameCoordinator.cancelCloseGame,
-                closeWithoutSavingRequested: {
-                    Task { await closeGameCoordinator.closeWithoutSaving() }
-                },
-                saveAndCloseRequested: {
-                    Task { await closeGameCoordinator.saveAndClose() }
-                }
+                cancelRequested: { frontend.send(.cancelCloseGame) },
+                closeWithoutSavingRequested: { frontend.send(.closeWithoutSaving) },
+                saveAndCloseRequested: { frontend.send(.saveAndClose) }
             )
             .frame(minWidth: 420, idealWidth: 460)
         }
-        .sheet(item: $closeGameCoordinator.resumePrompt) { prompt in
+        .sheet(item: resumePromptBinding) { prompt in
             ResumeProtectedSavePromptCard(
                 prompt: prompt,
                 continueRequested: {
-                    completePendingProtectedLaunchRequested(true)
+                    frontend.send(.completePendingProtectedLaunch(shouldResumeProtectedSave: true))
                 },
                 startFreshRequested: {
-                    completePendingProtectedLaunchRequested(false)
+                    frontend.send(.completePendingProtectedLaunch(shouldResumeProtectedSave: false))
                 }
             )
             .frame(minWidth: 420, idealWidth: 460)
@@ -102,13 +62,30 @@ struct ContentView: View {
         // visible. The child window would otherwise composite above
         // the main window's sheet area and (even with
         // ignoresMouseEvents) cause visual occlusion in that region.
-        .onChange(of: isAnyPromptVisible) { _, showingPrompt in
-            emulatorDisplayController.setContentVisible(showingPrompt == false)
-            gameplayKeyboardMonitorCoordinator.promptVisibilityDidChange(isVisible: showingPrompt)
+        .onChange(of: frontend.state.isAnyPromptVisible) { _, showingPrompt in
+            frontend.send(.promptVisibilityChanged(showingPrompt))
         }
     }
 
-    private var isAnyPromptVisible: Bool {
-        closeGameCoordinator.closePrompt != nil || closeGameCoordinator.resumePrompt != nil
+    private var closePromptBinding: Binding<CloseGamePromptState?> {
+        Binding(
+            get: { frontend.state.closePrompt },
+            set: { newValue in
+                if newValue == nil {
+                    frontend.send(.cancelCloseGame)
+                }
+            }
+        )
+    }
+
+    private var resumePromptBinding: Binding<ResumeProtectedSavePromptState?> {
+        Binding(
+            get: { frontend.state.resumePrompt },
+            set: { newValue in
+                if newValue == nil {
+                    frontend.closeGameCoordinator.dismissResumePrompt()
+                }
+            }
+        )
     }
 }

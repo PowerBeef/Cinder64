@@ -1,8 +1,7 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @Bindable var session: EmulationSession
-    let applyDisplayMode: (MainWindowDisplayMode) -> Void
+    @Bindable var frontend: EmulationFrontendModel
 
     var body: some View {
         ScrollView {
@@ -28,7 +27,7 @@ struct SettingsView: View {
                         Divider()
 
                         Stepper(value: binding(for: \.upscaleMultiplier), in: 1 ... 8) {
-                            LabeledContent("Renderer Upscaling", value: "\(session.activeSettings.upscaleMultiplier)x")
+                            LabeledContent("Renderer Upscaling", value: "\(frontend.state.activeSettings.upscaleMultiplier)x")
                         }
 
                         Toggle("Integer scaling", isOn: binding(for: \.integerScaling))
@@ -51,7 +50,7 @@ struct SettingsView: View {
                         subtitle: "Adjust emulation speed without changing the shell."
                     ) {
                         Stepper(value: binding(for: \.speedPercent), in: 25 ... 300, step: 5) {
-                            LabeledContent("Speed", value: "\(session.activeSettings.speedPercent)%")
+                            LabeledContent("Speed", value: "\(frontend.state.activeSettings.speedPercent)%")
                         }
                     }
                 }
@@ -67,22 +66,20 @@ struct SettingsView: View {
 
     private func binding<Value>(for keyPath: WritableKeyPath<CoreUserSettings, Value>) -> Binding<Value> {
         Binding(
-            get: { session.activeSettings[keyPath: keyPath] },
+            get: { frontend.state.activeSettings[keyPath: keyPath] },
             set: { newValue in
-                Task {
-                    var settings = session.activeSettings
-                    settings[keyPath: keyPath] = newValue
-                    try? await session.updateSettings(settings)
-                }
+                var settings = frontend.state.activeSettings
+                settings[keyPath: keyPath] = newValue
+                frontend.send(.updateSettings(settings))
             }
         )
     }
 
     private var displayModeBinding: Binding<MainWindowDisplayMode> {
         Binding(
-            get: { MainWindowDisplayMode(settings: session.activeSettings) },
+            get: { frontend.state.displayMode },
             set: { newValue in
-                applyDisplayMode(newValue)
+                frontend.send(.displayModeChanged(newValue))
             }
         )
     }

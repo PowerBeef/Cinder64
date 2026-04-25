@@ -5,64 +5,39 @@ import SwiftUI
 @main
 struct Cinder64App: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var session: EmulationSession
-    @State private var closeGameCoordinator: CloseGameCoordinator
+    @State private var frontend: EmulationFrontendModel
     @State private var mainWindowController = MainWindowController()
-    @State private var emulatorDisplayController = EmulatorDisplayController()
-    @State private var gameplayKeyboardMonitorCoordinator = GameplayKeyboardMonitorCoordinator()
 
     init() {
         do {
             let persistence = try PersistenceStore.live()
-            let session = EmulationSession(
-                coreHost: Gopher64CoreHost(logStore: persistence.logStore),
-                persistenceStore: persistence
-            )
-            _session = State(initialValue: session)
-            _closeGameCoordinator = State(initialValue: CloseGameCoordinator(session: session))
+            _frontend = State(initialValue: Self.makeFrontend(persistence: persistence))
         } catch {
             let fallback = PersistenceStore(
                 recentGamesStore: RecentGamesStore(storageURL: FileManager.default.temporaryDirectory.appending(path: "cinder64-fallback-recent.json")),
                 saveStateStore: SaveStateMetadataStore(storageURL: FileManager.default.temporaryDirectory.appending(path: "cinder64-fallback-savestates.json"))
             )
             fallback.logStore.record("error", "Failed to build live persistence: \(error.localizedDescription)")
-            let session = EmulationSession(
-                coreHost: Gopher64CoreHost(logStore: fallback.logStore),
-                persistenceStore: fallback
-            )
-            _session = State(initialValue: session)
-            _closeGameCoordinator = State(initialValue: CloseGameCoordinator(session: session))
+            _frontend = State(initialValue: Self.makeFrontend(persistence: fallback))
         }
     }
 
     var body: some Scene {
         Window("Cinder64", id: "main") {
-            ContentView(
-                session: session,
-                closeGameCoordinator: closeGameCoordinator,
-                emulatorDisplayController: emulatorDisplayController,
-                gameplayKeyboardMonitorCoordinator: gameplayKeyboardMonitorCoordinator,
-                openROMRequested: { Task { await openROM() } },
-                returnHomeRequested: { closeGameCoordinator.requestCloseGame(.returnHome) },
-                completePendingProtectedLaunchRequested: { shouldResumeProtectedSave in
-                    Task { await completePendingProtectedLaunch(shouldResumeProtectedSave: shouldResumeProtectedSave) }
-                },
-                launchROMRequested: { url in
-                    LaunchRequestBroker.shared.enqueue(url)
-                },
-                applyDisplayMode: applyDisplayMode
-            )
+            ContentView(frontend: frontend)
                 .background {
                     MainWindowAccessor(
-                        displayMode: MainWindowDisplayMode(settings: session.activeSettings),
-                        chromeMode: MainWindowChromeMode(shellMode: ShellPresentation.mode(for: session.snapshot)),
+                        displayMode: frontend.state.displayMode,
+                        chromeMode: MainWindowChromeMode(shellMode: frontend.state.shellMode),
                         controller: mainWindowController
                     )
                 }
                 .frame(minWidth: 860, minHeight: 560)
                 .task {
-                    await LaunchRequestBroker.shared.installHandler(handleLaunchRequest)
-                    configureCloseGameInterceptors()
+                    configureFrontendIntegration()
+                    await LaunchRequestBroker.shared.installHandler { url in
+                        await frontend.handle(.openROM(url))
+                    }
                 }
         }
         .restorationBehavior(.disabled)
@@ -70,75 +45,72 @@ struct Cinder64App: App {
         .commands {
             CommandGroup(after: .newItem) {
                 Button("Open ROM…") {
-                    Task { await openROM() }
+                    frontend.send(.chooseROM)
                 }
                 .keyboardShortcut("o")
 
                 Divider()
 
                 Button("Pause") {
-                    Task { try? await session.pause() }
+                    frontend.send(.pause)
                 }
                 .keyboardShortcut("p")
-                .disabled(session.snapshot.emulationState != .running)
+                .disabled(frontend.state.snapshot.emulationState != .running)
 
                 Button("Resume") {
-                    Task { try? await session.resume() }
+                    frontend.send(.resume)
                 }
                 .keyboardShortcut("r")
-                .disabled(session.snapshot.emulationState != .paused)
+                .disabled(frontend.state.snapshot.emulationState != .paused)
 
                 Button("Reset") {
-                    Task { try? await session.reset() }
+                    frontend.send(.reset)
                 }
                 .keyboardShortcut("k")
-                .disabled(session.snapshot.emulationState != .running && session.snapshot.emulationState != .paused)
+                .disabled(frontend.state.snapshot.emulationState != .running && frontend.state.snapshot.emulationState != .paused)
             }
 
             CommandMenu("Display Mode") {
                 ForEach(MainWindowDisplayMode.allCases, id: \.self) { mode in
                     Button(mode.title) {
-                        applyDisplayMode(mode)
+                        frontend.send(.displayModeChanged(mode))
                     }
-                    .disabled(MainWindowDisplayMode(settings: session.activeSettings) == mode)
+                    .disabled(frontend.state.displayMode == mode)
                 }
             }
         }
 
         Settings {
-            SettingsView(
-                session: session,
-                applyDisplayMode: applyDisplayMode
-            )
+            SettingsView(frontend: frontend)
                 .frame(width: 460, height: 520)
         }
     }
 
-    private func openROM() async {
+    private static func makeFrontend(persistence: PersistenceStore) -> EmulationFrontendModel {
+        let session = EmulationSession(
+            coreHost: makeLiveRuntimeCoreHost(logStore: persistence.logStore),
+            persistenceStore: persistence
+        )
+        let closeGameCoordinator = CloseGameCoordinator(session: session)
+        let renderSurfaceCoordinator = RenderSurfaceCoordinator(
+            displayController: EmulatorDisplayController()
+        )
+        return EmulationFrontendModel(
+            session: session,
+            closeGameCoordinator: closeGameCoordinator,
+            renderSurfaceCoordinator: renderSurfaceCoordinator,
+            inputCoordinator: GameplayInputCoordinator()
+        )
+    }
+
+    private func chooseROMFromPanel() async -> URL? {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = []
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.message = "Choose a Nintendo 64 ROM to launch in Cinder64."
 
-        guard panel.runModal() == .OK, let url = panel.url else {
-            return
-        }
-
-        LaunchRequestBroker.shared.enqueue(url)
-    }
-
-    private func handleLaunchRequest(_ url: URL) async {
-        do {
-            switch try await closeGameCoordinator.prepareLaunchRequest(for: url) {
-            case .launchNormally:
-                try await launchROM(url: url, loadProtectedCloseSave: false)
-            case .promptForProtectedResume:
-                reactivateMainWindow()
-            }
-        } catch {
-            session.presentWarning(title: "Unable to Launch ROM", message: error.localizedDescription)
-        }
+        return panel.runModal() == .OK ? panel.url : nil
     }
 
     private func reactivateMainWindow() {
@@ -153,49 +125,17 @@ struct Cinder64App: App {
         }
     }
 
-    private func applyDisplayMode(_ mode: MainWindowDisplayMode) {
-        var settings = session.activeSettings
-        mode.apply(to: &settings)
-        mainWindowController.apply(mode: mode)
-
-        Task {
-            try? await session.updateSettings(settings)
+    private func configureFrontendIntegration() {
+        frontend.openROMPanel = chooseROMFromPanel
+        frontend.enqueueLaunchRequest = { url in
+            LaunchRequestBroker.shared.enqueue(url)
         }
-    }
-
-    private func launchROM(url: URL, loadProtectedCloseSave: Bool) async throws {
-        try await session.openROM(url: url)
-        if loadProtectedCloseSave {
-            try await session.loadProtectedCloseState()
+        frontend.reactivateMainWindow = reactivateMainWindow
+        frontend.applyDisplayModeToWindow = { mode in
+            mainWindowController.apply(mode: mode)
         }
-        reactivateMainWindow()
-        mainWindowController.apply(mode: MainWindowDisplayMode(settings: session.activeSettings))
-        // Deliberately keep the main SwiftUI window key on ROM boot.
-        // Gameplay keys are scoped by GameplayKeyboardMonitorCoordinator
-        // so toolbar buttons, menu shortcuts, and prompt sheets keep
-        // normal AppKit focus behavior.
-        startScriptedKeyPlaybackIfNeeded()
-    }
-
-    private func completePendingProtectedLaunch(shouldResumeProtectedSave: Bool) async {
-        guard let pendingLaunch = closeGameCoordinator.resolvePendingLaunch(
-            shouldResumeProtectedSave: shouldResumeProtectedSave
-        ) else {
-            return
-        }
-
-        do {
-            try await launchROM(
-                url: pendingLaunch.url,
-                loadProtectedCloseSave: pendingLaunch.shouldResumeProtectedSave
-            )
-        } catch {
-            session.presentWarning(title: "Unable to Launch ROM", message: error.localizedDescription)
-        }
-    }
-
-    private func configureCloseGameInterceptors() {
-        closeGameCoordinator.onConfirmedExit = { intent in
+        frontend.startScriptedKeyPlayback = startScriptedKeyPlaybackIfNeeded
+        frontend.onConfirmedExit = { intent in
             switch intent {
             case .returnHome:
                 break
@@ -204,9 +144,9 @@ struct Cinder64App: App {
             case .quitApp:
                 Task { @MainActor in
                     do {
-                        try await session.dispose()
+                        try await frontend.session.dispose()
                     } catch {
-                        session.persistenceStore.logStore.record(
+                        frontend.session.persistenceStore.logStore.record(
                             "warning",
                             "dispose during quit failed: \(error.localizedDescription)"
                         )
@@ -215,26 +155,32 @@ struct Cinder64App: App {
                 }
             }
         }
+        frontend.renderSurfaceCoordinator.onSurfaceChanged = { descriptor in
+            frontend.send(.renderSurfaceChanged(descriptor))
+        }
+        frontend.renderSurfaceCoordinator.onPumpTick = {
+            frontend.send(.pumpTick)
+        }
         mainWindowController.shouldInterceptWindowClose = {
-            closeGameCoordinator.shouldInterceptExitRequests
+            frontend.closeGameCoordinator.shouldInterceptExitRequests
         }
         mainWindowController.requestCloseGameForWindowClose = {
-            closeGameCoordinator.requestCloseGame(.closeWindow)
+            frontend.closeGameCoordinator.requestCloseGame(.closeWindow)
         }
         mainWindowController.onTrackedWindowWillClose = {
-            gameplayKeyboardMonitorCoordinator.updateTrackedWindow(nil)
+            frontend.inputCoordinator.updateTrackedWindow(nil)
             Task { @MainActor in
-                try? await session.dispose()
+                try? await frontend.session.dispose()
             }
         }
         mainWindowController.onTrackedWindowChanged = { window in
-            gameplayKeyboardMonitorCoordinator.updateTrackedWindow(window)
+            frontend.inputCoordinator.updateTrackedWindow(window)
         }
         appDelegate.shouldInterceptTermination = {
-            closeGameCoordinator.shouldInterceptExitRequests
+            frontend.closeGameCoordinator.shouldInterceptExitRequests
         }
         appDelegate.requestCloseGameForQuit = {
-            closeGameCoordinator.requestCloseGame(.quitApp)
+            frontend.closeGameCoordinator.requestCloseGame(.quitApp)
         }
         appDelegate.hasTrackedMainWindow = {
             mainWindowController.hasTrackedWindow
@@ -243,11 +189,21 @@ struct Cinder64App: App {
             mainWindowController.reopenTrackedWindowIfNeeded()
         }
         appDelegate.applicationWillTerminate = {
-            gameplayKeyboardMonitorCoordinator.remove()
+            frontend.inputCoordinator.remove()
         }
-        gameplayKeyboardMonitorCoordinator.install(
-            session: session,
-            closeGameCoordinator: closeGameCoordinator
+        frontend.inputCoordinator.install(
+            eventHandler: { event in
+                frontend.send(.gameplayKey(event))
+            },
+            releaseHeldInput: {
+                frontend.send(.releaseGameplayInput)
+            },
+            emulationState: {
+                frontend.state.snapshot.emulationState
+            },
+            hasVisiblePrompt: {
+                frontend.state.isAnyPromptVisible
+            }
         )
     }
 
@@ -255,22 +211,22 @@ struct Cinder64App: App {
         let broker = LaunchRequestBroker.shared
 
         if let message = broker.scriptedKeyParseError {
-            session.persistenceStore.logStore.record("warning", "scripted-keys ignored: \(message)")
+            frontend.session.persistenceStore.logStore.record("warning", "scripted-keys ignored: \(message)")
         }
 
         let steps = broker.scriptedKeySteps
         guard steps.isEmpty == false else { return }
-        guard session.snapshot.emulationState == .running else { return }
+        guard frontend.state.snapshot.emulationState == .running else { return }
 
-        let logStore = session.persistenceStore.logStore
+        let logStore = frontend.session.persistenceStore.logStore
         logStore.record("info", "scripted-keys armed count=\(steps.count)")
         let player = ScriptedKeyPlayer(
             steps: steps,
             log: { message in logStore.record("info", message) }
         )
 
-        Task { [player, session] in
-            await player.play(on: session)
+        Task { [player, frontend] in
+            await player.play(on: frontend.session)
             logStore.record("info", "scripted-keys playback completed")
         }
     }

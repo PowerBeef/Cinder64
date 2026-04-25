@@ -1,33 +1,35 @@
 import SwiftUI
 
 struct HomeShellView: View {
-    @Bindable var session: EmulationSession
+    let snapshot: SessionSnapshot
+    let recentGames: [RecentGameRecord]
     let isResumePromptVisible: Bool
     let openROMRequested: () -> Void
     let launchROMRequested: (URL) -> Void
+    let dismissWarningRequested: () -> Void
 
     var body: some View {
         NavigationSplitView {
             RecentGamesListView(
-                session: session,
+                recentGames: recentGames,
                 openROMRequested: openROMRequested,
                 launchROMRequested: launchROMRequested
             )
             .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 250)
         } detail: {
             VStack(alignment: .leading, spacing: 12) {
-                if let banner = session.snapshot.warningBanner {
+                if let banner = snapshot.warningBanner {
                     WarningBannerBar(
                         banner: banner,
-                        dismiss: { session.dismissWarningBanner() }
+                        dismiss: dismissWarningRequested
                     )
                     .padding(.horizontal, 12)
                     .padding(.top, 12)
                 }
 
                 HomeDashboardView(
-                    content: HomeDashboardPresentation.content(for: session.recentGames),
-                    recentGames: Array(session.recentGames.prefix(3)),
+                    content: HomeDashboardPresentation.content(for: recentGames),
+                    recentGames: Array(recentGames.prefix(3)),
                     openROMRequested: openROMRequested,
                     launchROMRequested: launchROMRequested
                 )

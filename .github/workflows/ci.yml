@@ -13,7 +13,7 @@ concurrency:
 jobs:
   swift-test:
     name: swift test
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 25
 
     steps:
@@ -44,7 +44,7 @@ jobs:
 
   rust-bridge-test:
     name: rust bridge tests
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 35
 
     steps:
@@ -76,7 +76,7 @@ jobs:
 
   bundle-assembly:
     name: bundle assembly smoke
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 30
     # MoltenVK / libpng / freetype aren't installed on the runner by
     # default. Install via Homebrew and expose paths via the env vars

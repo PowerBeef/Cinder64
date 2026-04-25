@@ -82,6 +82,25 @@ final class EmulationSession {
     func openROM(url: URL) async throws {
         let romIdentity = try await resolveROMIdentity(for: url)
         let settings = try persistenceStore.settingsStore.loadSettings(for: romIdentity) ?? .default
+        try await openROM(url: url, romIdentity: romIdentity, settings: settings) {
+            try await waitForValidRenderSurface()
+        }
+    }
+
+    func openROM(url: URL, renderSurface: RenderSurfaceDescriptor) async throws {
+        let romIdentity = try await resolveROMIdentity(for: url)
+        let settings = try persistenceStore.settingsStore.loadSettings(for: romIdentity) ?? .default
+        try await openROM(url: url, romIdentity: romIdentity, settings: settings) {
+            renderSurface
+        }
+    }
+
+    private func openROM(
+        url: URL,
+        romIdentity: ROMIdentity,
+        settings: CoreUserSettings,
+        renderSurfaceProvider: () async throws -> RenderSurfaceDescriptor
+    ) async throws {
         deferredBootRenderSurface = nil
         activeSettings = settings
         snapshot = SessionSnapshot(
@@ -97,7 +116,7 @@ final class EmulationSession {
         advanceLifecycle(to: .booting)
 
         do {
-            let renderSurface = try await waitForValidRenderSurface()
+            let renderSurface = try await renderSurfaceProvider()
             let configuration = CoreHostConfiguration(
                 romIdentity: romIdentity,
                 runtimePaths: nil,

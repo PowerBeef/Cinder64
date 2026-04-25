@@ -8,17 +8,16 @@ import SwiftUI
 /// SDL/MoltenVK side effects and sheets/alerts presented on the main
 /// window work correctly.
 ///
-/// Callbacks (surface publication, pump) are wired directly
-/// onto `controller.surfaceView` so the child window's NSView is the
-/// single source of truth for per-session output plumbing.
+/// Surface publication and pump ticks are mediated by
+/// `RenderSurfaceCoordinator`, so the view only hosts the anchor and
+/// presentation shell.
 struct RenderSurfaceView: View {
     let snapshot: SessionSnapshot
-    let controller: EmulatorDisplayController
-    let surfaceChanged: (RenderSurfaceDescriptor?) -> Void
-    let pumpRuntimeEvents: () -> Void
+    let coordinator: RenderSurfaceCoordinator
 
     var body: some View {
-        EmulatorDisplayAnchorView(controller: controller)
+        if let controller = coordinator.displayController {
+            EmulatorDisplayAnchorView(controller: controller)
             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
@@ -28,17 +27,12 @@ struct RenderSurfaceView: View {
             .background(ShellPalette.offBlack, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
             .shadow(color: ShellPalette.stageShadow, radius: 18, y: 8)
             .onAppear {
-                wireSurfaceCallbacks()
-                controller.updateOverlay(for: snapshot)
+                coordinator.wireSurfaceCallbacks()
+                coordinator.updateOverlay(for: snapshot)
             }
             .onChange(of: snapshot) { _, newValue in
-                controller.updateOverlay(for: newValue)
+                coordinator.updateOverlay(for: newValue)
             }
-    }
-
-    private func wireSurfaceCallbacks() {
-        let surfaceView = controller.surfaceView
-        surfaceView.surfaceChanged = surfaceChanged
-        surfaceView.pumpRuntimeEvents = pumpRuntimeEvents
+        }
     }
 }
